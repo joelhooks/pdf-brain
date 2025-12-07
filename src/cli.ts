@@ -4,12 +4,56 @@
  */
 
 import { Effect, Console } from "effect";
+import { mkdirSync, existsSync } from "fs";
+import { basename, join } from "path";
 import {
   PDFLibrary,
   PDFLibraryLive,
   SearchOptions,
   AddOptions,
+  LibraryConfig,
+  URLFetchError,
 } from "./index.js";
+
+/**
+ * Check if a string is a URL
+ */
+function isURL(str: string): boolean {
+  return str.startsWith("http://") || str.startsWith("https://");
+}
+
+/**
+ * Extract filename from URL
+ */
+function filenameFromURL(url: string): string {
+  const urlObj = new URL(url);
+  const pathname = urlObj.pathname;
+  const filename = basename(pathname);
+  // If no .pdf extension, add it
+  return filename.endsWith(".pdf") ? filename : `${filename}.pdf`;
+}
+
+/**
+ * Download a PDF from URL to local path
+ */
+function downloadPDF(url: string, destPath: string) {
+  return Effect.tryPromise({
+    try: async () => {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("pdf") && !url.endsWith(".pdf")) {
+        throw new Error(`Not a PDF: content-type is ${contentType}`);
+      }
+      const buffer = await response.arrayBuffer();
+      await Bun.write(destPath, buffer);
+      return destPath;
+    },
+    catch: (e) => new URLFetchError({ url, reason: String(e) }),
+  });
+}
 
 const HELP = `
 pdf-library - Local PDF knowledge base with vector search
@@ -18,7 +62,7 @@ Usage:
   pdf-library <command> [options]
 
 Commands:
-  add <path>              Add a PDF to the library
+  add <path|url>          Add a PDF to the library (supports URLs)
     --title <title>       Custom title (default: filename)
     --tags <tags>         Comma-separated tags
 
@@ -42,6 +86,11 @@ Commands:
 
 Options:
   --help, -h              Show this help
+
+Examples:
+  pdf-library add ./book.pdf --tags "programming,rust"
+  pdf-library add https://example.com/paper.pdf --title "Research Paper"
+  pdf-library search "machine learning" --limit 5
 `;
 
 function parseArgs(args: string[]) {
@@ -79,20 +128,50 @@ const program = Effect.gen(function* () {
 
   switch (command) {
     case "add": {
-      const path = args[1];
-      if (!path) {
-        yield* Console.error("Error: Path required");
+      const pathOrUrl = args[1];
+      if (!pathOrUrl) {
+        yield* Console.error("Error: Path or URL required");
         process.exit(1);
       }
 
       const opts = parseArgs(args.slice(2));
-      const title = opts.title as string | undefined;
       const tags = opts.tags
         ? (opts.tags as string).split(",").map((t) => t.trim())
         : undefined;
 
-      yield* Console.log(`Adding: ${path}`);
-      const doc = yield* library.add(path, new AddOptions({ title, tags }));
+      let localPath: string;
+      let title = opts.title as string | undefined;
+
+      if (isURL(pathOrUrl)) {
+        // Download from URL
+        const config = LibraryConfig.fromEnv();
+        const downloadsDir = join(config.libraryPath, "downloads");
+
+        // Ensure downloads directory exists
+        if (!existsSync(downloadsDir)) {
+          mkdirSync(downloadsDir, { recursive: true });
+        }
+
+        const filename = filenameFromURL(pathOrUrl);
+        localPath = join(downloadsDir, filename);
+
+        // Default title from URL filename if not provided
+        if (!title) {
+          title = basename(filename, ".pdf");
+        }
+
+        yield* Console.log(`Downloading: ${pathOrUrl}`);
+        yield* downloadPDF(pathOrUrl, localPath);
+        yield* Console.log(`  Saved to: ${localPath}`);
+      } else {
+        localPath = pathOrUrl;
+      }
+
+      yield* Console.log(`Adding: ${localPath}`);
+      const doc = yield* library.add(
+        localPath,
+        new AddOptions({ title, tags }),
+      );
       yield* Console.log(`✓ Added: ${doc.title}`);
       yield* Console.log(`  ID: ${doc.id}`);
       yield* Console.log(`  Pages: ${doc.pageCount}`);

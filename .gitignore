@@ -24,3 +24,5 @@ dist/
 
 # Test files
 *.test.pdf
+postgres.data
+vector.tar.gz

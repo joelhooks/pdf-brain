@@ -14,11 +14,7 @@ import {
   LibraryConfig,
   URLFetchError,
 } from "./index.js";
-import {
-  Migration,
-  MigrationLive,
-  MigrationError,
-} from "./services/Migration.js";
+import { Migration, MigrationLive } from "./services/Migration.js";
 
 /**
  * Check if a string is a URL

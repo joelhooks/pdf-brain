@@ -131,19 +131,21 @@ OPTION 1: Fresh Start (Easiest)
 
 OPTION 2: Manual Migration (Preserve Data)
 ───────────────────────────────────────────
-This requires temporarily using PGlite 0.2.x to export your data.
+Migration scripts are provided in the repository.
 
-1. Generate export script:
-   pdf-library migration generate-script > export.sh
+1. Export data using PGlite 0.2.x:
+   cd /path/to/pdf-library
+   npm install @electric-sql/pglite@0.2.12
+   node scripts/migration/export-pg16.mjs
 
-2. Run the export script (requires PGlite 0.2.x):
-   chmod +x export.sh && ./export.sh
+2. Import into PGlite 0.3.x:
+   bun run scripts/migration/import-pg17.ts
 
-3. Import the dump file:
-   pdf-library migration import library-dump.sql
+3. Regenerate embeddings (if needed):
+   bun run scripts/migration/regenerate-embeddings.ts
 
-For detailed instructions, visit:
-https://github.com/yourusername/pdf-library/docs/migration.md
+For detailed instructions, see:
+https://github.com/joelhooks/pdf-library#migration
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `,

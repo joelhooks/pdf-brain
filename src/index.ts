@@ -21,13 +21,35 @@ import {
 
 import { Ollama, OllamaLive } from "./services/Ollama.js";
 import { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
+import { MarkdownExtractor, MarkdownExtractorLive } from "./services/MarkdownExtractor.js";
 import { Database, DatabaseLive } from "./services/Database.js";
 
 // Re-export types and services
 export * from "./types.js";
 export { Ollama, OllamaLive } from "./services/Ollama.js";
 export { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
+export { MarkdownExtractor, MarkdownExtractorLive } from "./services/MarkdownExtractor.js";
 export { Database, DatabaseLive } from "./services/Database.js";
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Check if a file is a markdown file based on extension
+ */
+function isMarkdownFile(path: string): boolean {
+  const lowerPath = path.toLowerCase();
+  return lowerPath.endsWith(".md") || lowerPath.endsWith(".markdown");
+}
+
+/**
+ * Extract first H1 heading from markdown content
+ */
+function extractFirstH1(content: string): string | null {
+  const match = content.match(/^#\s+(.+)$/m);
+  return match ? match[1].trim() : null;
+}
 
 // ============================================================================
 // Library Service
@@ -39,7 +61,8 @@ export { Database, DatabaseLive } from "./services/Database.js";
 export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
   effect: Effect.gen(function* () {
     const ollama = yield* Ollama;
-    const extractor = yield* PDFExtractor;
+    const pdfExtractor = yield* PDFExtractor;
+    const markdownExtractor = yield* MarkdownExtractor;
     const db = yield* Database;
     const config = LibraryConfig.fromEnv();
 
@@ -50,7 +73,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
       checkReady: () => ollama.checkHealth(),
 
       /**
-       * Add a PDF to the library
+       * Add a PDF or Markdown file to the library
        */
       add: (pdfPath: string, options: AddOptions = new AddOptions({})) =>
         Effect.gen(function* () {
@@ -78,15 +101,38 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             .update(resolvedPath)
             .digest("hex")
             .slice(0, 12);
-          const title = options.title || basename(resolvedPath, ".pdf");
 
-          // Process PDF
-          const { pageCount, chunks } = yield* extractor.process(resolvedPath);
+          // Detect file type and route to appropriate extractor
+          const isMarkdown = isMarkdownFile(resolvedPath);
+          const fileType = isMarkdown ? ("markdown" as const) : ("pdf" as const);
+          
+          // Determine title based on file type
+          let title: string;
+          if (options.title) {
+            title = options.title;
+          } else if (isMarkdown) {
+            // For markdown, try to extract first H1, fallback to filename
+            const { extract } = markdownExtractor;
+            const extracted = yield* Effect.either(extract(resolvedPath));
+            if (extracted._tag === "Right" && extracted.right.sections.length > 0) {
+              const firstH1 = extracted.right.sections.find(s => s.heading);
+              title = firstH1?.heading || basename(resolvedPath, ".md").replace(/\.markdown$/, "");
+            } else {
+              title = basename(resolvedPath, ".md").replace(/\.markdown$/, "");
+            }
+          } else {
+            title = basename(resolvedPath, ".pdf");
+          }
+
+          // Process file with appropriate extractor
+          const { pageCount, chunks } = yield* (isMarkdown
+            ? markdownExtractor.process(resolvedPath)
+            : pdfExtractor.process(resolvedPath));
 
           if (chunks.length === 0) {
             return yield* Effect.fail(
               new DocumentNotFoundError({
-                query: "No text content extracted from PDF",
+                query: `No text content extracted from ${fileType}`,
               }),
             );
           }
@@ -100,6 +146,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             pageCount,
             sizeBytes: stat.size,
             tags: options.tags || [],
+            fileType,
             metadata: options.metadata,
           });
 
@@ -297,7 +344,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
       repair: () => db.repair(),
     };
   }),
-  dependencies: [OllamaLive, PDFExtractorLive, DatabaseLive],
+  dependencies: [OllamaLive, PDFExtractorLive, MarkdownExtractorLive, DatabaseLive],
 }) {}
 
 // ============================================================================

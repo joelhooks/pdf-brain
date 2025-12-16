@@ -30,14 +30,23 @@ function filenameFromURL(url: string): string {
   const urlObj = new URL(url);
   const pathname = urlObj.pathname;
   const filename = basename(pathname);
-  // If no .pdf extension, add it
-  return filename.endsWith(".pdf") ? filename : `${filename}.pdf`;
+  // If already has .pdf, .md, or .markdown extension, keep it
+  if (filename.endsWith(".pdf") || filename.endsWith(".md") || filename.endsWith(".markdown")) {
+    return filename;
+  }
+  // Otherwise, try to infer from URL
+  // GitHub raw URLs often have .md in path
+  if (pathname.includes(".md")) {
+    return `${filename}.md`;
+  }
+  // Default to .pdf for backwards compatibility
+  return `${filename}.pdf`;
 }
 
 /**
- * Download a PDF from URL to local path
+ * Download a file (PDF or Markdown) from URL to local path
  */
-function downloadPDF(url: string, destPath: string) {
+function downloadFile(url: string, destPath: string) {
   return Effect.tryPromise({
     try: async () => {
       const response = await fetch(url);
@@ -45,8 +54,16 @@ function downloadPDF(url: string, destPath: string) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
       const contentType = response.headers.get("content-type") || "";
-      if (!contentType.includes("pdf") && !url.endsWith(".pdf")) {
-        throw new Error(`Not a PDF: content-type is ${contentType}`);
+      const isPDF = contentType.includes("pdf") || url.endsWith(".pdf");
+      const isMarkdown = 
+        contentType.includes("text/markdown") || 
+        contentType.includes("text/plain") || 
+        contentType.includes("text/x-markdown") ||
+        url.endsWith(".md") || 
+        url.endsWith(".markdown");
+      
+      if (!isPDF && !isMarkdown) {
+        throw new Error(`Unsupported content type: ${contentType}`);
       }
       const buffer = await response.arrayBuffer();
       await Bun.write(destPath, buffer);
@@ -57,17 +74,17 @@ function downloadPDF(url: string, destPath: string) {
 }
 
 const HELP = `
-pdf-library - Local PDF knowledge base with vector search
+pdf-library - Local PDF and Markdown knowledge base with vector search
 
 Usage:
   pdf-library <command> [options]
 
 Commands:
-  add <path|url>          Add a PDF to the library (supports URLs)
+  add <path|url>          Add a PDF or Markdown file to the library (supports URLs)
     --title <title>       Custom title (default: filename)
     --tags <tags>         Comma-separated tags
 
-  search <query>          Semantic search across all PDFs
+  search <query>          Semantic search across all documents
     --limit <n>           Max results (default: 10)
     --tag <tag>           Filter by tag
     --fts                 Full-text search only (no embeddings)
@@ -104,7 +121,9 @@ Options:
 
 Examples:
   pdf-library add ./book.pdf --tags "programming,rust"
+  pdf-library add ./notes.md --tags "documentation,api"
   pdf-library add https://example.com/paper.pdf --title "Research Paper"
+  pdf-library add https://raw.githubusercontent.com/user/repo/main/README.md
   pdf-library search "machine learning" --limit 5
   pdf-library migrate --check
   pdf-library migrate --import backup.sql
@@ -174,11 +193,12 @@ const program = Effect.gen(function* () {
 
         // Default title from URL filename if not provided
         if (!title) {
-          title = basename(filename, ".pdf");
+          // Strip extension (.pdf, .md, .markdown)
+          title = basename(filename).replace(/\.(pdf|md|markdown)$/, "");
         }
 
         yield* Console.log(`Downloading: ${pathOrUrl}`);
-        yield* downloadPDF(pathOrUrl, localPath);
+        yield* downloadFile(pathOrUrl, localPath);
         yield* Console.log(`  Saved to: ${localPath}`);
       } else {
         localPath = pathOrUrl;

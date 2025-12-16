@@ -16,6 +16,9 @@ export class PDFDocument extends Schema.Class<PDFDocument>("PDFDocument")({
   pageCount: Schema.Number,
   sizeBytes: Schema.Number,
   tags: Schema.Array(Schema.String),
+  fileType: Schema.optionalWith(Schema.Literal("pdf", "markdown"), {
+    default: () => "pdf" as const,
+  }),
   metadata: Schema.optional(
     Schema.Record({ key: Schema.String, value: Schema.Unknown }),
   ),
@@ -109,6 +112,16 @@ export class PDFNotFoundError extends Schema.TaggedError<PDFNotFoundError>()(
 
 export class PDFExtractionError extends Schema.TaggedError<PDFExtractionError>()(
   "PDFExtractionError",
+  { path: Schema.String, reason: Schema.String },
+) {}
+
+export class MarkdownNotFoundError extends Schema.TaggedError<MarkdownNotFoundError>()(
+  "MarkdownNotFoundError",
+  { path: Schema.String },
+) {}
+
+export class MarkdownExtractionError extends Schema.TaggedError<MarkdownExtractionError>()(
+  "MarkdownExtractionError",
   { path: Schema.String, reason: Schema.String },
 ) {}
 

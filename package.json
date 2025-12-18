@@ -12,7 +12,10 @@
     "dev": "bun run src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "setup": "./scripts/setup.sh"
+    "setup": "./scripts/setup.sh",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "pnpm test && pnpm typecheck && changeset publish"
   },
   "dependencies": {
     "@effect/platform": "^0.72.0",
@@ -30,6 +33,7 @@
     "unist-util-visit": "^5.0.0"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.29.8",
     "@types/bun": "latest",
     "@types/mdast": "^4.0.4",
     "typescript": "^5.7.2"

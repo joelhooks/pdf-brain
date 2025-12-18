@@ -71,6 +71,16 @@ export class Database extends Context.Tag("Database")<
       options?: SearchOptions,
     ) => Effect.Effect<SearchResult[], DatabaseError>;
 
+    // Context expansion
+    readonly getExpandedContext: (
+      docId: string,
+      chunkIndex: number,
+      options?: { maxChars?: number; direction?: "before" | "after" | "both" },
+    ) => Effect.Effect<
+      { content: string; startIndex: number; endIndex: number },
+      DatabaseError
+    >;
+
     // Stats
     readonly getStats: () => Effect.Effect<
       { documents: number; chunks: number; embeddings: number },
@@ -534,6 +544,89 @@ export const DatabaseLive = Layer.scoped(
               orphanedChunks,
               orphanedEmbeddings,
               zeroVectorEmbeddings,
+            };
+          },
+          catch: (e) => new DatabaseError({ reason: String(e) }),
+        }),
+
+      getExpandedContext: (docId, chunkIndex, options = {}) =>
+        Effect.tryPromise({
+          try: async () => {
+            const { maxChars = 2000, direction = "both" } = options;
+
+            // Get the target chunk first
+            const targetResult = await db.query(
+              `SELECT chunk_index, content FROM chunks 
+               WHERE doc_id = $1 AND chunk_index = $2`,
+              [docId, chunkIndex],
+            );
+
+            if (targetResult.rows.length === 0) {
+              return {
+                content: "",
+                startIndex: chunkIndex,
+                endIndex: chunkIndex,
+              };
+            }
+
+            const targetContent = (targetResult.rows[0] as { content: string })
+              .content;
+            let totalContent = targetContent;
+            let startIdx = chunkIndex;
+            let endIdx = chunkIndex;
+
+            // Expand before (lower chunk indices)
+            if (direction === "before" || direction === "both") {
+              let beforeIdx = chunkIndex - 1;
+              while (totalContent.length < maxChars && beforeIdx >= 0) {
+                const beforeResult = await db.query(
+                  `SELECT chunk_index, content FROM chunks 
+                   WHERE doc_id = $1 AND chunk_index = $2`,
+                  [docId, beforeIdx],
+                );
+                if (beforeResult.rows.length === 0) break;
+
+                const beforeContent = (
+                  beforeResult.rows[0] as { content: string }
+                ).content;
+                // Check if adding this chunk would exceed budget
+                if (totalContent.length + beforeContent.length > maxChars * 1.2)
+                  break;
+
+                totalContent = beforeContent + "\n" + totalContent;
+                startIdx = beforeIdx;
+                beforeIdx--;
+              }
+            }
+
+            // Expand after (higher chunk indices)
+            if (direction === "after" || direction === "both") {
+              let afterIdx = chunkIndex + 1;
+              while (totalContent.length < maxChars) {
+                const afterResult = await db.query(
+                  `SELECT chunk_index, content FROM chunks 
+                   WHERE doc_id = $1 AND chunk_index = $2`,
+                  [docId, afterIdx],
+                );
+                if (afterResult.rows.length === 0) break;
+
+                const afterContent = (
+                  afterResult.rows[0] as { content: string }
+                ).content;
+                // Check if adding this chunk would exceed budget
+                if (totalContent.length + afterContent.length > maxChars * 1.2)
+                  break;
+
+                totalContent = totalContent + "\n" + afterContent;
+                endIdx = afterIdx;
+                afterIdx++;
+              }
+            }
+
+            return {
+              content: totalContent,
+              startIndex: startIdx,
+              endIndex: endIdx,
             };
           },
           catch: (e) => new DatabaseError({ reason: String(e) }),

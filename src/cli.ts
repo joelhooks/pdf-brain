@@ -145,6 +145,7 @@ Commands:
     --limit <n>           Max results (default: 10)
     --tag <tag>           Filter by tag
     --fts                 Full-text search only (no embeddings)
+    --expand <chars>      Expand context around matches (default: 0, max: 4000)
 
   list                    List all documents
     --tag <tag>           Filter by tag
@@ -287,16 +288,19 @@ const program = Effect.gen(function* () {
       const limit = opts.limit ? parseInt(opts.limit as string, 10) : 10;
       const tags = opts.tag ? [opts.tag as string] : undefined;
       const ftsOnly = opts.fts === true;
+      const expandChars = opts.expand
+        ? Math.min(4000, Math.max(0, parseInt(opts.expand as string, 10)))
+        : 0;
 
       yield* Console.log(
-        `Searching: "${query}"${ftsOnly ? " (FTS only)" : ""}\n`,
+        `Searching: "${query}"${ftsOnly ? " (FTS only)" : ""}${expandChars > 0 ? ` (expand: ${expandChars} chars)` : ""}\n`,
       );
 
       const results = ftsOnly
         ? yield* library.ftsSearch(query, new SearchOptions({ limit, tags }))
         : yield* library.search(
             query,
-            new SearchOptions({ limit, tags, hybrid: true }),
+            new SearchOptions({ limit, tags, hybrid: true, expandChars }),
           );
 
       if (results.length === 0) {
@@ -306,9 +310,21 @@ const program = Effect.gen(function* () {
           yield* Console.log(
             `[${r.score.toFixed(3)}] ${r.title} (p.${r.page})`,
           );
-          yield* Console.log(
-            `  ${r.content.slice(0, 200).replace(/\n/g, " ")}...`,
-          );
+
+          if (r.expandedContent && expandChars > 0) {
+            // Show expanded content with range info
+            const rangeInfo = r.expandedRange
+              ? ` [chunks ${r.expandedRange.start}-${r.expandedRange.end}]`
+              : "";
+            yield* Console.log(`  --- Expanded context${rangeInfo} ---`);
+            yield* Console.log(`  ${r.expandedContent.replace(/\n/g, "\n  ")}`);
+            yield* Console.log(`  --- End context ---`);
+          } else {
+            // Default: truncated snippet
+            yield* Console.log(
+              `  ${r.content.slice(0, 200).replace(/\n/g, " ")}...`,
+            );
+          }
           yield* Console.log("");
         }
       }

@@ -49,6 +49,12 @@ export class SearchResult extends Schema.Class<SearchResult>("SearchResult")({
   content: Schema.String,
   score: Schema.Number,
   matchType: Schema.Literal("vector", "fts", "hybrid"),
+  /** Expanded context around the match (only populated when expandChars > 0) */
+  expandedContent: Schema.optional(Schema.String),
+  /** Range of chunk indices included in expandedContent */
+  expandedRange: Schema.optional(
+    Schema.Struct({ start: Schema.Number, end: Schema.Number }),
+  ),
 }) {}
 
 // ============================================================================
@@ -99,6 +105,8 @@ export class SearchOptions extends Schema.Class<SearchOptions>("SearchOptions")(
     threshold: Schema.optionalWith(Schema.Number, { default: () => 0.3 }),
     tags: Schema.optional(Schema.Array(Schema.String)),
     hybrid: Schema.optionalWith(Schema.Boolean, { default: () => true }),
+    /** Max chars for expanded context per result. 0 = no expansion (default) */
+    expandChars: Schema.optionalWith(Schema.Number, { default: () => 0 }),
   },
 ) {}
 

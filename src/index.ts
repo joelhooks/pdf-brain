@@ -237,7 +237,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
        */
       search: (query: string, options: SearchOptions = new SearchOptions({})) =>
         Effect.gen(function* () {
-          const { hybrid, limit } = options;
+          const { hybrid, limit, expandChars = 0 } = options;
           const results: SearchResult[] = [];
 
           // Vector search
@@ -279,7 +279,70 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
           }
 
           // Sort by score and limit
-          return results.sort((a, b) => b.score - a.score).slice(0, limit);
+          let finalResults = results
+            .sort((a, b) => b.score - a.score)
+            .slice(0, limit);
+
+          // Expand context if requested
+          if (expandChars > 0) {
+            // Dedupe expansion: track which (docId, chunkIndex) ranges we've already expanded
+            // to avoid fetching overlapping chunks multiple times
+            const expandedRanges = new Map<
+              string,
+              { start: number; end: number; content: string }
+            >();
+
+            finalResults = yield* Effect.all(
+              finalResults.map((result) =>
+                Effect.gen(function* () {
+                  const key = `${result.docId}`;
+
+                  // Check if this chunk is already covered by a previous expansion
+                  const existing = expandedRanges.get(key);
+                  if (
+                    existing &&
+                    result.chunkIndex >= existing.start &&
+                    result.chunkIndex <= existing.end
+                  ) {
+                    // Already have this context, reuse it
+                    return new SearchResult({
+                      ...result,
+                      expandedContent: existing.content,
+                      expandedRange: {
+                        start: existing.start,
+                        end: existing.end,
+                      },
+                    });
+                  }
+
+                  // Fetch expanded context
+                  const expanded = yield* db.getExpandedContext(
+                    result.docId,
+                    result.chunkIndex,
+                    { maxChars: expandChars },
+                  );
+
+                  // Cache for deduplication
+                  expandedRanges.set(key, {
+                    start: expanded.startIndex,
+                    end: expanded.endIndex,
+                    content: expanded.content,
+                  });
+
+                  return new SearchResult({
+                    ...result,
+                    expandedContent: expanded.content,
+                    expandedRange: {
+                      start: expanded.startIndex,
+                      end: expanded.endIndex,
+                    },
+                  });
+                }),
+              ),
+            );
+          }
+
+          return finalResults;
         }),
 
       /**

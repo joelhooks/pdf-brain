@@ -1,5 +1,16 @@
 # pdf-brain
 
+## 0.6.1
+
+### Patch Changes
+
+- ec1bab7: Update CLI branding and UX improvements
+
+  - Add ascii art banner to help output
+  - Add `--version` / `-v` flag
+  - Add `read` as alias for `get` command
+  - Rename all references from pdf-library to pdf-brain
+
 ## 0.6.0
 
 ### Minor Changes

@@ -218,7 +218,7 @@ function parseArgs(args: string[]) {
   return result;
 }
 
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 
 const program = Effect.gen(function* () {
   const args = process.argv.slice(2);

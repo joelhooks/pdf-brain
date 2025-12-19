@@ -1,5 +1,5 @@
 ---
-"@joelhooks/pdf-brain": minor
+"pdf-brain": minor
 ---
 
 Add PGlite daemon for multi-process safety

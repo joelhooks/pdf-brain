@@ -1,5 +1,5 @@
 ---
-"@joelhooks/pdf-brain": patch
+"pdf-brain": patch
 ---
 
 Fix PGlite WAL accumulation causing unrecoverable crash

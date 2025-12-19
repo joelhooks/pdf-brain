@@ -99,6 +99,9 @@ export class Database extends Context.Tag("Database")<
 
     // WAL management
     readonly checkpoint: () => Effect.Effect<void, DatabaseError>;
+
+    // Backup/restore
+    readonly dumpDataDir: () => Effect.Effect<Blob, DatabaseError>;
   }
 >() {}
 
@@ -646,6 +649,18 @@ export const DatabaseLive = Layer.scoped(
           },
           catch: (e) =>
             new DatabaseError({ reason: `Checkpoint failed: ${e}` }),
+        }),
+
+      dumpDataDir: () =>
+        Effect.tryPromise({
+          try: async () => {
+            // Run checkpoint first to ensure all data is flushed
+            await db.exec("CHECKPOINT");
+            // Dump the entire datadir as a gzipped tarball
+            // This is a portable backup that can be restored with loadDataDir
+            return await db.dumpDataDir("gzip");
+          },
+          catch: (e) => new DatabaseError({ reason: `Dump failed: ${e}` }),
         }),
     };
   })

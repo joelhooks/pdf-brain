@@ -7,6 +7,12 @@ import { Effect, Console } from "effect";
 import { mkdirSync, existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { basename, extname, join, dirname } from "path";
 import { fileURLToPath } from "url";
+import {
+  startDaemon,
+  stopDaemon,
+  isDaemonRunning,
+  DaemonConfig,
+} from "./services/Daemon.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(
@@ -219,10 +225,14 @@ Commands:
   check                   Verify Ollama is running and model available
 
   doctor                  Check WAL health and database status
-                          Warns if WAL files accumulate excessively
+                           Warns if WAL files accumulate excessively
 
   repair                  Fix database integrity issues
-                          Removes orphaned chunks/embeddings
+                           Removes orphaned chunks/embeddings
+
+  daemon start            Start background daemon process
+  daemon stop             Stop daemon gracefully
+  daemon status           Show daemon running status
 
   export                  Export library for backup or sharing
     --output <path>       Output file (default: ./pdf-brain-export.tar.gz)
@@ -737,10 +747,159 @@ async function gracefulShutdown(signal: string) {
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
-// Handle migrate command separately (doesn't need full PDFLibrary)
+// Handle daemon and migrate commands separately (don't need full PDFLibrary)
 const args = process.argv.slice(2);
 
-if (args[0] === "migrate") {
+if (args[0] === "daemon") {
+  const subcommand = args[1];
+  const config = LibraryConfig.fromEnv();
+  const daemonConfig: DaemonConfig = {
+    socketPath: config.libraryPath, // Directory for socket file
+    pidPath: join(config.libraryPath, "daemon.pid"),
+    dbPath: config.dbPath,
+  };
+
+  const daemonProgram = Effect.gen(function* () {
+    switch (subcommand) {
+      case "start": {
+        // Check if already running
+        const running = yield* Effect.promise(() =>
+          isDaemonRunning(daemonConfig)
+        );
+
+        if (running) {
+          yield* Console.log("✓ Daemon is already running");
+          break;
+        }
+
+        // Check for --foreground flag
+        const opts = parseArgs(args.slice(2));
+        if (opts.foreground) {
+          // Run daemon in foreground (called by detached spawn)
+          yield* Console.log("Starting daemon in foreground...");
+          yield* Console.log(
+            `  Socket: ${daemonConfig.socketPath}/.s.PGSQL.5432`
+          );
+          yield* Console.log(`  PID: ${process.pid}`);
+          yield* Effect.promise(() => startDaemon(daemonConfig));
+
+          // Keep process alive - daemon handles shutdown via signals
+          yield* Effect.promise(() => new Promise(() => {}));
+        } else {
+          // Spawn background process
+          yield* Console.log("Starting daemon...");
+
+          const proc = Bun.spawn(
+            [
+              "bun",
+              "run",
+              join(__dirname, "cli.ts"),
+              "daemon",
+              "start",
+              "--foreground",
+            ],
+            {
+              cwd: process.cwd(),
+              stdio: ["ignore", "ignore", "ignore"],
+              detached: true,
+            }
+          );
+          proc.unref();
+
+          // Wait for socket to be available (max 5 seconds)
+          const startTime = Date.now();
+          const timeout = 5000;
+          while (Date.now() - startTime < timeout) {
+            const running = yield* Effect.promise(() =>
+              isDaemonRunning(daemonConfig)
+            );
+            if (running) {
+              yield* Console.log("✓ Daemon started successfully");
+              yield* Console.log(
+                `  Socket: ${daemonConfig.socketPath}/.s.PGSQL.5432`
+              );
+              break;
+            }
+            // Wait 100ms before checking again
+            yield* Effect.sleep("100 millis");
+          }
+
+          const finalCheck = yield* Effect.promise(() =>
+            isDaemonRunning(daemonConfig)
+          );
+          if (!finalCheck) {
+            yield* Console.error("⚠ Daemon may have failed to start");
+            yield* Console.error("  Check logs for details");
+            process.exit(1);
+          }
+        }
+        break;
+      }
+
+      case "stop": {
+        const running = yield* Effect.promise(() =>
+          isDaemonRunning(daemonConfig)
+        );
+
+        if (!running) {
+          yield* Console.log("Daemon is not running");
+          break;
+        }
+
+        yield* Console.log("Stopping daemon...");
+        yield* Effect.promise(() => stopDaemon(daemonConfig));
+        yield* Console.log("✓ Daemon stopped");
+        break;
+      }
+
+      case "status": {
+        const running = yield* Effect.promise(() =>
+          isDaemonRunning(daemonConfig)
+        );
+
+        if (running) {
+          yield* Console.log("✓ Daemon is running");
+          yield* Console.log(
+            `  Socket: ${daemonConfig.socketPath}/.s.PGSQL.5432`
+          );
+          yield* Console.log(`  PID file: ${daemonConfig.pidPath}`);
+        } else {
+          yield* Console.log("Daemon is not running");
+        }
+        break;
+      }
+
+      default: {
+        yield* Console.error(
+          `Unknown daemon subcommand: ${subcommand || "(none)"}`
+        );
+        yield* Console.log(`
+Usage: pdf-brain daemon <subcommand>
+
+Subcommands:
+  start    Start the daemon in background
+  stop     Stop the daemon gracefully
+  status   Show daemon status
+
+The daemon solves PGlite's single-connection limitation by running
+a background process that owns the database and exposes it via Unix socket.
+        `);
+        process.exit(1);
+      }
+    }
+  });
+
+  Effect.runPromise(
+    daemonProgram.pipe(
+      Effect.catchAll((error) =>
+        Effect.gen(function* () {
+          yield* Console.error(`Daemon Error: ${JSON.stringify(error)}`);
+          process.exit(1);
+        })
+      )
+    )
+  );
+} else if (args[0] === "migrate") {
   const migrateProgram = Effect.gen(function* () {
     const opts = parseArgs(args.slice(1));
     const migration = yield* Migration;

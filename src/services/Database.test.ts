@@ -471,3 +471,85 @@ describe("checkpoint", () => {
     );
   });
 });
+
+// ============================================================================
+// Daemon Routing Tests
+// ============================================================================
+
+describe("DatabaseLive routing", () => {
+  test("uses direct PGlite when daemon is not running", async () => {
+    // In test environment, daemon is never running (temp directory)
+    // This test verifies the fallback works
+    const result = await runDb((db) =>
+      Effect.gen(function* () {
+        // Add a document to verify we're using a working database
+        const doc = new PDFDocument({
+          id: "routing-test-1",
+          title: "Routing Test",
+          path: "/fake/routing.pdf",
+          addedAt: new Date(),
+          pageCount: 1,
+          sizeBytes: 1000,
+          tags: [],
+        });
+        yield* db.addDocument(doc);
+
+        // Retrieve it to confirm it was stored
+        return yield* db.getDocument("routing-test-1");
+      })
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.title).toBe("Routing Test");
+  });
+
+  test("direct PGlite supports all database operations", async () => {
+    // Verify that the direct PGlite implementation (used when daemon not running)
+    // supports all required operations
+    await runDb((db) =>
+      Effect.gen(function* () {
+        // Document operations
+        const doc = new PDFDocument({
+          id: "ops-test",
+          title: "Operations Test",
+          path: "/fake/ops.pdf",
+          addedAt: new Date(),
+          pageCount: 2,
+          sizeBytes: 2000,
+          tags: ["test"],
+        });
+        yield* db.addDocument(doc);
+
+        // Chunk operations
+        yield* db.addChunks([
+          {
+            id: "ops-test-0",
+            docId: "ops-test",
+            page: 1,
+            chunkIndex: 0,
+            content: "First chunk content",
+          },
+        ]);
+
+        // Embeddings (vector search requires embeddings)
+        yield* db.addEmbeddings([
+          {
+            chunkId: "ops-test-0",
+            embedding: new Array(1024).fill(0.1), // mxbai-embed-large dimension
+          },
+        ]);
+
+        // Stats
+        const stats = yield* db.getStats();
+        expect(stats.documents).toBeGreaterThan(0);
+
+        // Repair
+        const repairResult = yield* db.repair();
+        expect(repairResult.orphanedChunks).toBe(0);
+
+        // Checkpoint
+        yield* db.checkpoint();
+      })
+    );
+  });
+});

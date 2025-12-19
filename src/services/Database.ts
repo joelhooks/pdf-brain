@@ -3,6 +3,13 @@
  *
  * Uses PGlite (WASM Postgres) with pgvector for proper vector similarity search.
  * No native extensions needed - pgvector is bundled with PGlite.
+ *
+ * DAEMON-AWARE CONNECTION:
+ * - If daemon is running: routes to DatabaseClient (Unix socket connection)
+ * - If daemon not running: uses direct PGlite (current behavior)
+ *
+ * This solves PGlite's single-connection limitation while maintaining
+ * backwards compatibility for single-process usage.
  */
 
 import { Effect, Context, Layer } from "effect";
@@ -17,6 +24,8 @@ import {
   DatabaseError,
   LibraryConfig,
 } from "../types.js";
+import { DatabaseClient } from "./DatabaseClient.js";
+import { isDaemonRunning } from "./Daemon.js";
 
 // Embedding dimension for mxbai-embed-large
 const EMBEDDING_DIM = 1024;
@@ -109,7 +118,57 @@ export class Database extends Context.Tag("Database")<
 // Implementation
 // ============================================================================
 
-export const DatabaseLive = Layer.scoped(
+/**
+ * Main Database Layer - routes to daemon client or direct PGlite
+ *
+ * Strategy:
+ * 1. Check if daemon is running (socket exists + responds)
+ * 2. If yes: build Database from DatabaseClient (Unix socket connection)
+ * 3. If no: use DirectDatabaseLive (direct PGlite, current behavior)
+ *
+ * This provides multi-process safety via daemon while maintaining
+ * single-process simplicity when daemon isn't running.
+ */
+export const DatabaseLive = Layer.unwrapEffect(
+  Effect.gen(function* () {
+    const config = LibraryConfig.fromEnv();
+
+    // Build daemon config
+    const daemonConfig = {
+      socketPath: config.libraryPath,
+      pidPath: `${config.libraryPath}/daemon.pid`,
+      dbPath: config.dbPath,
+    };
+
+    // Check if daemon is running
+    const running = yield* Effect.promise(() => isDaemonRunning(daemonConfig));
+
+    if (running) {
+      // Route to DatabaseClient (Unix socket connection)
+      // Build layer that provides Database service using DatabaseClient implementation
+      return Layer.effect(
+        Database,
+        DatabaseClient.make(config.libraryPath).pipe(
+          Layer.build,
+          Effect.flatMap((context) =>
+            Effect.succeed(Context.get(context, DatabaseClient))
+          )
+        )
+      );
+    } else {
+      // Route to direct PGlite implementation
+      return DirectDatabaseLive;
+    }
+  })
+);
+
+/**
+ * Direct PGlite implementation (original DatabaseLive behavior)
+ *
+ * Used when daemon is not running - provides single-process access
+ * to PGlite database.
+ */
+const DirectDatabaseLive = Layer.scoped(
   Database,
   Effect.gen(function* () {
     const config = LibraryConfig.fromEnv();

@@ -731,7 +731,7 @@ async function gracefulShutdown(signal: string) {
       });
 
       await Effect.runPromise(
-        checkpointEffect.pipe(Effect.provide(DatabaseLive))
+        checkpointEffect.pipe(Effect.provide(DatabaseLive), Effect.scoped)
       );
       console.error("✓ CHECKPOINT complete");
     }
@@ -953,6 +953,7 @@ a background process that owns the database and exposes it via Unix socket.
   Effect.runPromise(
     program.pipe(
       Effect.provide(PDFLibraryLive),
+      Effect.scoped,
       Effect.catchAll((error: unknown) =>
         Effect.gen(function* () {
           const errorObj = error as { _tag?: string };

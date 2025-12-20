@@ -25,6 +25,7 @@ import {
   AutoTaggerLive,
   type EnrichmentResult,
 } from "./services/AutoTagger.js";
+import { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(
@@ -909,6 +910,87 @@ const program = Effect.gen(function* () {
       break;
     }
 
+    case "init": {
+      const config = LibraryConfig.fromEnv();
+      yield* Console.log("Initializing pdf-brain...\n");
+
+      // 1. Check/create library directory
+      if (!existsSync(config.libraryPath)) {
+        mkdirSync(config.libraryPath, { recursive: true });
+        yield* Console.log(
+          `✓ Created library directory: ${config.libraryPath}`
+        );
+      } else {
+        yield* Console.log(`✓ Library directory exists: ${config.libraryPath}`);
+      }
+
+      // 2. Initialize database (happens automatically via library.stats())
+      yield* Console.log("✓ Database initialized");
+
+      // 3. Check Ollama
+      const ollamaResult = yield* Effect.either(library.checkReady());
+      if (ollamaResult._tag === "Right") {
+        yield* Console.log("✓ Ollama is ready");
+      } else {
+        yield* Console.log(
+          "⚠ Ollama not available - run 'ollama serve' and pull models:"
+        );
+        yield* Console.log("    ollama pull mxbai-embed-large");
+        yield* Console.log("    ollama pull llama3.2:3b");
+      }
+
+      // 4. Seed taxonomy if empty
+      const taxonomyLayer = TaxonomyServiceImpl.make({
+        url: `file:${config.dbPath}`,
+      });
+      const seedResult = yield* Effect.either(
+        Effect.gen(function* () {
+          const taxonomy = yield* TaxonomyService;
+          const concepts = yield* taxonomy.listConcepts();
+
+          if (concepts.length === 0) {
+            // Load and seed default taxonomy
+            const taxonomyFile = join(__dirname, "..", "data", "taxonomy.json");
+            if (existsSync(taxonomyFile)) {
+              const taxonomyData = JSON.parse(
+                readFileSync(taxonomyFile, "utf-8")
+              ) as TaxonomyJSON;
+              yield* taxonomy.seedFromJSON(taxonomyData);
+              yield* Console.log(
+                `✓ Seeded taxonomy with ${taxonomyData.concepts.length} concepts`
+              );
+            } else {
+              yield* Console.log(
+                "⚠ No taxonomy.json found - skipping taxonomy seed"
+              );
+            }
+          } else {
+            yield* Console.log(
+              `✓ Taxonomy already has ${concepts.length} concepts`
+            );
+          }
+        }).pipe(Effect.provide(taxonomyLayer))
+      );
+
+      if (seedResult._tag === "Left") {
+        yield* Console.log(
+          "⚠ Taxonomy seed failed - you can seed manually with 'pdf-brain taxonomy seed'"
+        );
+      }
+
+      // 5. Show stats
+      const stats = yield* library.stats();
+      yield* Console.log(`\n📊 Library Status:`);
+      yield* Console.log(`   Documents:  ${stats.documents}`);
+      yield* Console.log(`   Chunks:     ${stats.chunks}`);
+      yield* Console.log(`   Embeddings: ${stats.embeddings}`);
+
+      yield* Console.log(`\n✨ Ready! Add documents with:`);
+      yield* Console.log(`   pdf-brain add <file.pdf> --enrich`);
+      yield* Console.log(`   pdf-brain ingest <directory> --enrich`);
+      break;
+    }
+
     case "repair": {
       yield* Console.log("Checking database integrity...\n");
       const result = yield* library.repair();
@@ -1039,30 +1121,50 @@ const program = Effect.gen(function* () {
     }
 
     case "ingest": {
-      const directory = args[1];
-      if (!directory) {
-        yield* Console.error("Error: Directory required");
-        yield* Console.error("Usage: pdf-brain ingest <directory> [options]");
+      // Support multiple directories: pdf-brain ingest dir1 dir2 dir3 --enrich
+      const directories: string[] = [];
+      let i = 1;
+      while (i < args.length && !args[i].startsWith("--")) {
+        directories.push(args[i]);
+        i++;
+      }
+
+      if (directories.length === 0) {
+        yield* Console.error("Error: At least one directory required");
+        yield* Console.error(
+          "Usage: pdf-brain ingest <dir1> [dir2] [dir3] [options]"
+        );
+        yield* Console.error("");
+        yield* Console.error("Options:");
+        yield* Console.error(
+          "  --enrich       Full LLM enrichment (title, summary, concepts)"
+        );
+        yield* Console.error(
+          "  --auto-tag     Light tagging (heuristics + LLM)"
+        );
+        yield* Console.error("  --tags a,b,c   Manual tags for all files");
+        yield* Console.error("  --sample N     Process only first N files");
+        yield* Console.error("  --no-tui       Disable TUI, use simple output");
         process.exit(1);
       }
 
-      // Resolve to absolute path
-      const targetDir = directory.startsWith("/")
-        ? directory
-        : join(process.cwd(), directory);
-
-      if (!existsSync(targetDir)) {
-        yield* Console.error(`Error: Directory not found: ${targetDir}`);
-        process.exit(1);
+      // Resolve and validate directories
+      const targetDirs: string[] = [];
+      for (const dir of directories) {
+        const targetDir = dir.startsWith("/") ? dir : join(process.cwd(), dir);
+        if (!existsSync(targetDir)) {
+          yield* Console.error(`Error: Directory not found: ${targetDir}`);
+          process.exit(1);
+        }
+        const dirStat = statSync(targetDir);
+        if (!dirStat.isDirectory()) {
+          yield* Console.error(`Error: Not a directory: ${targetDir}`);
+          process.exit(1);
+        }
+        targetDirs.push(targetDir);
       }
 
-      const dirStat = statSync(targetDir);
-      if (!dirStat.isDirectory()) {
-        yield* Console.error(`Error: Not a directory: ${targetDir}`);
-        process.exit(1);
-      }
-
-      const opts = parseArgs(args.slice(2));
+      const opts = parseArgs(args.slice(i));
       const recursive = opts.recursive !== false; // default true
       const manualTags = opts.tags
         ? (opts.tags as string).split(",").map((t) => t.trim())
@@ -1073,36 +1175,49 @@ const program = Effect.gen(function* () {
       const useTui = opts["no-tui"] !== true;
       const autoTag = opts["auto-tag"] === true;
       const enrich = opts.enrich === true;
-      const checkpointInterval = getCheckpointInterval(opts);
+      // Always checkpoint after every file for crash safety
+      const checkpointInterval = 1;
 
-      // Discover files
-      yield* Console.log(`Scanning ${targetDir}...`);
+      // Discover files from all directories
+      yield* Console.log(
+        `Scanning ${targetDirs.length} director${
+          targetDirs.length > 1 ? "ies" : "y"
+        }...`
+      );
 
       const discoverFiles = (dir: string): string[] => {
         const files: string[] = [];
-        const entries = readdirSync(dir);
-
-        for (const entry of entries) {
-          const fullPath = join(dir, entry);
-          try {
-            const stat = statSync(fullPath);
-            if (stat.isDirectory() && recursive) {
-              files.push(...discoverFiles(fullPath));
-            } else if (stat.isFile()) {
-              const ext = extname(entry).toLowerCase();
-              if (ext === ".pdf" || ext === ".md" || ext === ".markdown") {
-                files.push(fullPath);
+        try {
+          const entries = readdirSync(dir);
+          for (const entry of entries) {
+            const fullPath = join(dir, entry);
+            try {
+              const stat = statSync(fullPath);
+              if (stat.isDirectory() && recursive) {
+                files.push(...discoverFiles(fullPath));
+              } else if (stat.isFile()) {
+                const ext = extname(entry).toLowerCase();
+                if (ext === ".pdf" || ext === ".md" || ext === ".markdown") {
+                  files.push(fullPath);
+                }
               }
+            } catch {
+              // Skip files we can't access
             }
-          } catch {
-            // Skip files we can't access
           }
+        } catch {
+          // Skip directories we can't read
         }
         return files;
       };
 
-      let files = discoverFiles(targetDir);
-      yield* Console.log(`Found ${files.length} files`);
+      let files: string[] = [];
+      for (const dir of targetDirs) {
+        const found = discoverFiles(dir);
+        yield* Console.log(`  ${basename(dir)}: ${found.length} files`);
+        files.push(...found);
+      }
+      yield* Console.log(`Total: ${files.length} files`);
 
       if (files.length === 0) {
         yield* Console.log("No PDF or Markdown files found");
@@ -1174,33 +1289,62 @@ const program = Effect.gen(function* () {
 
               if (autoTag || enrich) {
                 const tagger = yield* AutoTagger;
+                const pdfExtractor = yield* PDFExtractor;
                 const ext = extname(filePath).toLowerCase();
                 let content: string | undefined;
 
-                // Read content for markdown files
-                if (ext === ".md" || ext === ".markdown") {
-                  try {
-                    content = yield* Effect.promise(() =>
-                      Bun.file(filePath).text()
+                if (ext === ".pdf") {
+                  // Extract PDF text for enrichment
+                  if (enrich) {
+                    currentFile.status = "chunking";
+                    tui.update({ currentFile });
+                    const extractResult = yield* Effect.either(
+                      pdfExtractor.extract(filePath)
                     );
-                  } catch {
-                    content = undefined;
+                    if (extractResult._tag === "Right") {
+                      const pages = extractResult.right.pages.slice(0, 10);
+                      content = pages.map((p) => p.text).join("\n\n");
+                      if (content.length > 8000) {
+                        content = content.slice(0, 8000);
+                      }
+                    }
+                  }
+                } else if (ext === ".md" || ext === ".markdown") {
+                  const readResult = yield* Effect.either(
+                    Effect.promise(() => Bun.file(filePath).text())
+                  );
+                  if (readResult._tag === "Right") {
+                    content = readResult.right;
                   }
                 }
 
+                currentFile.status = "embedding";
+                tui.update({ currentFile });
+
                 if (enrich && content) {
                   const enrichResult = yield* tagger.enrich(filePath, content, {
-                    basePath: targetDir,
+                    basePath: targetDirs[0],
                   });
                   title = enrichResult.title;
                   fileTags = [...fileTags, ...enrichResult.tags];
+                } else if (enrich && !content) {
+                  // Enrichment requested but no content
+                  const tagResult = yield* tagger.generateTags(
+                    filePath,
+                    undefined,
+                    {
+                      heuristicsOnly: true,
+                      basePath: targetDirs[0],
+                    }
+                  );
+                  fileTags = [...fileTags, ...tagResult.allTags];
                 } else {
                   const tagResult = yield* tagger.generateTags(
                     filePath,
                     content,
                     {
                       heuristicsOnly: !content,
-                      basePath: targetDir,
+                      basePath: targetDirs[0],
                     }
                   );
                   fileTags = [...fileTags, ...tagResult.allTags];
@@ -1307,43 +1451,83 @@ const program = Effect.gen(function* () {
             // For auto-tag or enrich, we need to read content first
             if (autoTag || enrich) {
               const tagger = yield* AutoTagger;
+              const pdfExtractor = yield* PDFExtractor;
 
               // Read file content for LLM analysis
               const ext = extname(filePath).toLowerCase();
               let content: string | undefined;
 
-              try {
-                if (ext === ".pdf") {
-                  // For PDFs, we'll use heuristics + path tags
-                  // Full content extraction happens during add
-                  content = undefined;
-                } else {
-                  // For markdown, read directly
-                  content = yield* Effect.promise(() =>
-                    Bun.file(filePath).text()
+              if (ext === ".pdf") {
+                // Extract PDF text for enrichment
+                if (enrich) {
+                  yield* Console.log(`    Extracting PDF text...`);
+                  const extractResult = yield* Effect.either(
+                    pdfExtractor.extract(filePath)
                   );
+                  if (extractResult._tag === "Right") {
+                    // Use first 10 pages, max 8k chars
+                    const pages = extractResult.right.pages.slice(0, 10);
+                    content = pages.map((p) => p.text).join("\n\n");
+                    if (content.length > 8000) {
+                      content = content.slice(0, 8000);
+                    }
+                  }
                 }
-              } catch {
-                content = undefined;
+              } else {
+                // For markdown, read directly
+                const readResult = yield* Effect.either(
+                  Effect.promise(() => Bun.file(filePath).text())
+                );
+                if (readResult._tag === "Right") {
+                  content = readResult.right;
+                }
               }
 
               if (enrich && content) {
                 // Full enrichment with LLM
+                yield* Console.log(`    Enriching with LLM...`);
                 const enrichResult = yield* tagger.enrich(filePath, content, {
-                  basePath: targetDir,
+                  basePath: targetDirs[0],
                 });
                 title = enrichResult.title;
                 fileTags = [...fileTags, ...enrichResult.tags];
                 yield* Console.log(`    Title: ${enrichResult.title}`);
-                yield* Console.log(`    Tags: ${enrichResult.tags.join(", ")}`);
+                if (enrichResult.author) {
+                  yield* Console.log(`    Author: ${enrichResult.author}`);
+                }
+                yield* Console.log(`    Type: ${enrichResult.documentType}`);
+                yield* Console.log(
+                  `    Tags: ${enrichResult.tags.slice(0, 5).join(", ")}`
+                );
+                if (enrichResult.concepts && enrichResult.concepts.length > 0) {
+                  yield* Console.log(
+                    `    Concepts: ${enrichResult.concepts
+                      .slice(0, 3)
+                      .join(", ")}`
+                  );
+                }
+              } else if (enrich && !content) {
+                // Enrichment requested but no content - fall back to heuristics
+                yield* Console.log(
+                  `    No content extracted, using heuristics`
+                );
+                const tagResult = yield* tagger.generateTags(
+                  filePath,
+                  undefined,
+                  {
+                    heuristicsOnly: true,
+                    basePath: targetDirs[0],
+                  }
+                );
+                fileTags = [...fileTags, ...tagResult.allTags];
               } else {
                 // Just auto-tag (heuristics + optional LLM)
                 const tagResult = yield* tagger.generateTags(
                   filePath,
                   content,
                   {
-                    heuristicsOnly: !content, // Use LLM if we have content
-                    basePath: targetDir,
+                    heuristicsOnly: !content,
+                    basePath: targetDirs[0],
                   }
                 );
                 fileTags = [...fileTags, ...tagResult.allTags];
@@ -1698,7 +1882,12 @@ if (args[0] === "taxonomy") {
   // Run with error handling
   Effect.runPromise(
     program.pipe(
-      Effect.provide(Layer.merge(PDFLibraryLive, AutoTaggerLive)),
+      Effect.provide(
+        Layer.merge(
+          Layer.merge(PDFLibraryLive, AutoTaggerLive),
+          PDFExtractorLive
+        )
+      ),
       Effect.scoped,
       Effect.catchAll((error: unknown) =>
         Effect.gen(function* () {

@@ -1,0 +1,105 @@
+Vector Search Benchmark
+======================
+
+Fetching database statistics...
+Documents: 194
+Chunks: 50379
+Embeddings: 50363
+
+Generating 100 query embeddings...
+Generated 100 embeddings
+
+Benchmarking k=5...
+  Avg: 19.71ms
+  P50: 18.57ms
+  P95: 27.85ms
+  P99: 33.23ms
+  Results/query: 5.0
+
+Benchmarking k=10...
+  Avg: 17.09ms
+  P50: 16.36ms
+  P95: 23.57ms
+  P99: 27.65ms
+  Results/query: 10.0
+
+Benchmarking k=20...
+  Avg: 16.99ms
+  P50: 16.01ms
+  P95: 24.26ms
+  P99: 28.16ms
+  Results/query: 20.0
+
+Benchmarking k=50...
+  Avg: 17.20ms
+  P50: 17.17ms
+  P95: 20.90ms
+  P99: 22.33ms
+  Results/query: 50.0
+
+{
+  "timestamp": "2025-12-20T16:47:31.660Z",
+  "num_queries": 100,
+  "memory_usage_mb": {
+    "before": 18.43,
+    "after": 18.86,
+    "delta": 0.43
+  },
+  "benchmarks": [
+    {
+      "k": 5,
+      "latency_ms": {
+        "avg": 19.71155594999997,
+        "p50": 18.56600000000003,
+        "p95": 27.85199999999986,
+        "p99": 33.228665999999976,
+        "min": 13.13949999999977,
+        "max": 33.43804199999977
+      },
+      "results_per_query": 5
+    },
+    {
+      "k": 10,
+      "latency_ms": {
+        "avg": 17.09011160999996,
+        "p50": 16.362041999999747,
+        "p95": 23.570791999999983,
+        "p99": 27.646334000000024,
+        "min": 12.74429199999986,
+        "max": 32.233374999999796
+      },
+      "results_per_query": 10
+    },
+    {
+      "k": 20,
+      "latency_ms": {
+        "avg": 16.991597900000052,
+        "p50": 16.00683300000037,
+        "p95": 24.259125000000495,
+        "p99": 28.160084000000097,
+        "min": 12.579584000000068,
+        "max": 28.339249999999993
+      },
+      "results_per_query": 20
+    },
+    {
+      "k": 50,
+      "latency_ms": {
+        "avg": 17.20198913999994,
+        "p50": 17.17425000000003,
+        "p95": 20.896999999999935,
+        "p99": 22.325041000000056,
+        "min": 12.82733399999961,
+        "max": 24.293666999999914
+      },
+      "results_per_query": 50
+    }
+  ],
+  "database_stats": {
+    "documents": 194,
+    "chunks": 50379,
+    "embeddings": 50363
+  }
+}
+
+✅ Benchmark complete!

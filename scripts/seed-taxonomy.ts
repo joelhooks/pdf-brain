@@ -3,12 +3,11 @@
 /**
  * Seed the taxonomy database from data/taxonomy.json
  *
- * Loads the SKOS taxonomy structure and populates the database
- * with concepts and hierarchical relationships.
+ * Initializes the database if needed, then loads the SKOS taxonomy
+ * structure and populates it with concepts and hierarchical relationships.
  */
 
-import { Effect } from "effect";
-import os from "node:os";
+import { Effect, Layer } from "effect";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import {
@@ -16,8 +15,8 @@ import {
   TaxonomyServiceImpl,
   type TaxonomyJSON,
 } from "../src/services/TaxonomyService.js";
-
-const DB_PATH = join(os.homedir(), "Documents", ".pdf-library", "library.db");
+import { PDFLibrary, PDFLibraryLive } from "../src/index.js";
+import { LibraryConfig } from "../src/types.js";
 
 const TAXONOMY_FILE = join(import.meta.dir, "..", "data", "taxonomy.json");
 
@@ -33,11 +32,23 @@ async function seedTaxonomy() {
       `   Found ${taxonomy.hierarchy?.length || 0} hierarchy relationships\n`
     );
 
-    // Create service layer
-    const layer = TaxonomyServiceImpl.make({ url: `file:${DB_PATH}` });
+    // Get config for DB path
+    const config = LibraryConfig.fromEnv();
+
+    // Create taxonomy layer using same DB
+    const taxonomyLayer = TaxonomyServiceImpl.make({
+      url: `file:${config.dbPath}`,
+    });
+
+    // Combined layer: PDFLibrary (inits schema) + TaxonomyService
+    const appLayer = PDFLibraryLive.pipe(Layer.provideMerge(taxonomyLayer));
 
     // Seed the database
     const program = Effect.gen(function* () {
+      // Touch the library to ensure schema is initialized
+      const library = yield* PDFLibrary;
+      yield* library.stats();
+
       const service = yield* TaxonomyService;
 
       console.log("🌱 Seeding taxonomy...");
@@ -67,7 +78,7 @@ async function seedTaxonomy() {
     });
 
     // Run the program
-    await Effect.runPromise(Effect.provide(program, layer));
+    await Effect.runPromise(Effect.provide(program, appLayer));
 
     console.log("\n✨ Done!\n");
   } catch (error) {

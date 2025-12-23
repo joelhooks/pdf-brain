@@ -202,12 +202,115 @@ export class LibSQLDatabase {
           vectorSearch: (queryEmbedding, options) =>
             Effect.tryPromise({
               try: async () => {
-                const { limit = 10, tags, threshold = 0.0 } = options || {};
+                const {
+                  limit = 10,
+                  tags,
+                  threshold = 0.0,
+                  includeClusterSummaries = false,
+                } = options || {};
                 const queryVec = JSON.stringify(queryEmbedding);
 
-                // Use vector_top_k with the DiskANN index for fast ANN search
-                // vector_top_k returns rowid as 'id', we join to get full data
-                // Then calculate actual distance for scoring
+                // RAPTOR multi-scale retrieval: query both chunks AND cluster summaries
+                if (includeClusterSummaries) {
+                  const fetchLimit =
+                    tags && tags.length > 0 ? limit * 2 : limit;
+                  const maxDistance =
+                    threshold > 0 ? 2 * (1 - threshold) : null;
+
+                  // Query chunks
+                  const chunkArgs: any[] = [queryVec, queryVec, fetchLimit];
+                  const chunkConditions: string[] = [];
+
+                  if (tags && tags.length > 0) {
+                    chunkConditions.push(
+                      "(" +
+                        tags
+                          .map(
+                            () =>
+                              "EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
+                          )
+                          .join(" OR ") +
+                        ")"
+                    );
+                    chunkArgs.push(...tags);
+                  }
+
+                  if (maxDistance !== null) {
+                    chunkConditions.push(
+                      `vector_distance_cos(e.embedding, vector32(?)) <= ?`
+                    );
+                    chunkArgs.push(queryVec, maxDistance);
+                  }
+
+                  const chunkResults = await client.execute({
+                    sql: `
+                      SELECT 
+                        c.doc_id,
+                        d.title,
+                        c.page,
+                        c.chunk_index,
+                        c.content,
+                        vector_distance_cos(e.embedding, vector32(?)) as distance
+                      FROM vector_top_k('embeddings_idx', vector32(?), ?) AS top
+                      JOIN embeddings e ON e.rowid = top.id
+                      JOIN chunks c ON c.id = e.chunk_id
+                      JOIN documents d ON d.id = c.doc_id
+                      ${
+                        chunkConditions.length > 0
+                          ? " WHERE " + chunkConditions.join(" AND ")
+                          : ""
+                      }
+                    `,
+                    args: chunkArgs,
+                  });
+
+                  // Query cluster summaries
+                  const clusterArgs: any[] = [queryVec, queryVec, fetchLimit];
+                  const clusterConditions: string[] = [];
+
+                  if (maxDistance !== null) {
+                    clusterConditions.push(
+                      `vector_distance_cos(cs.embedding, vector32(?)) <= ?`
+                    );
+                    clusterArgs.push(queryVec, maxDistance);
+                  }
+
+                  const clusterResults = await client.execute({
+                    sql: `
+                      SELECT 
+                        '' as doc_id,
+                        'Cluster Summary' as title,
+                        0 as page,
+                        cs.id as chunk_index,
+                        cs.summary as content,
+                        vector_distance_cos(cs.embedding, vector32(?)) as distance
+                      FROM vector_top_k('cluster_summaries_idx', vector32(?), ?) AS top
+                      JOIN cluster_summaries cs ON cs.rowid = top.id
+                      ${
+                        clusterConditions.length > 0
+                          ? " WHERE " + clusterConditions.join(" AND ")
+                          : ""
+                      }
+                    `,
+                    args: clusterArgs,
+                  });
+
+                  // Merge and sort by score
+                  return [...chunkResults.rows, ...clusterResults.rows]
+                    .map((row: any) => ({
+                      docId: row.doc_id,
+                      title: row.title,
+                      page: Number(row.page),
+                      chunkIndex: Number(row.chunk_index),
+                      content: row.content,
+                      score: 1 - Number(row.distance) / 2,
+                      matchType: "vector" as const,
+                    }))
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, limit);
+                }
+
+                // Standard chunk-only search
                 let sql = `
                   SELECT 
                     c.doc_id,
@@ -498,6 +601,48 @@ export class LibSQLDatabase {
                 reason: "dumpDataDir not supported for LibSQL",
               })
             ),
+
+          streamEmbeddings: async function* (batchSize: number) {
+            // Stream embeddings in batches to avoid loading all into memory
+            // Useful for clustering large embedding sets
+            let offset = 0;
+
+            while (true) {
+              const result = await client.execute({
+                sql: `SELECT chunk_id, embedding FROM embeddings LIMIT ? OFFSET ?`,
+                args: [batchSize, offset],
+              });
+
+              if (result.rows.length === 0) break;
+
+              // Convert rows to expected format
+              const batch = result.rows.map((row: any) => ({
+                chunkId: row.chunk_id as string,
+                embedding: Array.from(row.embedding as Float32Array),
+              }));
+
+              yield batch;
+
+              if (result.rows.length < batchSize) break;
+              offset += batchSize;
+            }
+          },
+
+          bulkInsertClusterAssignments: (assignments) =>
+            Effect.tryPromise({
+              try: async () => {
+                if (assignments.length === 0) return;
+
+                // Use batch for atomic transaction
+                const statements = assignments.map((a) => ({
+                  sql: "INSERT INTO chunk_clusters (chunk_id, cluster_id, distance) VALUES (?, ?, ?)",
+                  args: [a.chunkId, a.clusterId, a.distance],
+                }));
+
+                await client.batch(statements, "write");
+              },
+              catch: (e) => new DatabaseError({ reason: String(e) }),
+            }),
         };
       })
     );
@@ -666,6 +811,56 @@ async function initSchema(client: Client): Promise<void> {
   // Vector index for concept embeddings (same compression as document embeddings)
   await client.execute(
     `CREATE INDEX IF NOT EXISTS concept_embeddings_idx ON concept_embeddings(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`
+  );
+
+  // ============================================================================
+  // RAPTOR Clustering Schema (Hard Clustering with K-means)
+  // ============================================================================
+  //
+  // RAPTOR-style multi-scale retrieval where queries can match:
+  // 1. Individual chunks (leaf nodes)
+  // 2. Cluster summaries (intermediate nodes)
+  //
+  // Uses hard clustering (k-means) where each chunk belongs to exactly one cluster
+  // with a distance metric to the centroid.
+
+  // Chunk-Cluster assignments (hard membership with distance to centroid)
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS chunk_clusters (
+      chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+      cluster_id INTEGER NOT NULL,
+      distance REAL NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY(chunk_id, cluster_id)
+    )
+  `);
+
+  // Cluster summaries with embedded metadata
+  // Combines cluster metadata, summary, and concept mapping in a single table
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS cluster_summaries (
+      id INTEGER PRIMARY KEY,
+      centroid F32_BLOB(${EMBEDDING_DIM}),
+      summary TEXT,
+      embedding F32_BLOB(${EMBEDDING_DIM}),
+      concept_id TEXT,
+      concept_confidence REAL,
+      chunk_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Indexes for efficient cluster queries
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_chunk_clusters_cluster ON chunk_clusters(cluster_id)`
+  );
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS idx_cluster_summaries_concept ON cluster_summaries(concept_id)`
+  );
+
+  // Vector index for cluster summary embeddings (for multi-scale retrieval)
+  await client.execute(
+    `CREATE INDEX IF NOT EXISTS cluster_summaries_idx ON cluster_summaries(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`
   );
 
   // Triggers to keep FTS5 in sync with chunks table

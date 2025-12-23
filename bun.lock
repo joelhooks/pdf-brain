@@ -10,6 +10,7 @@
         "@effect/platform": "^0.72.0",
         "@effect/platform-bun": "^0.52.0",
         "@effect/schema": "^0.75.0",
+        "@electric-sql/pglite": "^0.3.0",
         "@libsql/client": "^0.15.15",
         "ai": "^5.0.115",
         "dotenv": "^17.2.3",
@@ -94,6 +95,8 @@
     "@effect/platform-node-shared": ["@effect/platform-node-shared@0.22.2", "", { "dependencies": { "@parcel/watcher": "^2.4.1", "multipasta": "^0.2.5" }, "peerDependencies": { "@effect/platform": "^0.72.2", "effect": "^3.12.2" } }, "sha512-LRmcC2NSzxdJLXc22tHuTau63Mn/TjOz5UKEAcVCOrNTnDx1zXTP4UwDTkvlko6P8PEUElMqjcUOr2jwR19/UQ=="],
 
     "@effect/schema": ["@effect/schema@0.75.5", "", { "dependencies": { "fast-check": "^3.21.0" }, "peerDependencies": { "effect": "^3.9.2" } }, "sha512-TQInulTVCuF+9EIbJpyLP6dvxbQJMphrnRqgexm/Ze39rSjfhJuufF7XvU3SxTgg3HnL7B/kpORTJbHhlE6thw=="],
+
+    "@electric-sql/pglite": ["@electric-sql/pglite@0.3.14", "", {}, "sha512-3DB258dhqdsArOI1fIt7cb9RpUOgcDg5hXWVgVHAeqVQ/qxtFy605QKs4gx6mFq3jWsSPqDN8TgSEsqC3OfV9Q=="],
 
     "@inquirer/external-editor": ["@inquirer/external-editor@1.0.3", "", { "dependencies": { "chardet": "^2.1.1", "iconv-lite": "^0.7.0" }, "peerDependencies": { "@types/node": ">=18" }, "optionalPeers": ["@types/node"] }, "sha512-RWbSrDiYmO4LbejWY7ttpxczuwQyZLBUyygsA9Nsv95hpzUWwnNTVQmAq3xuh7vNwCp07UTmE5i11XAEExx4RA=="],
 

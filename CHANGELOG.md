@@ -1,5 +1,11 @@
 # pdf-brain
 
+## 1.1.2
+
+### Patch Changes
+
+- Add @electric-sql/pglite as production dependency for migration service
+
 ## 1.1.1
 
 ### Patch Changes

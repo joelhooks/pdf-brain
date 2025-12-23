@@ -434,6 +434,7 @@ Commands:
                           Returns surrounding chunks up to char budget
     --concepts-only       Search only taxonomy concepts
     --docs-only           Search only documents (skip concepts)
+    --include-clusters    Multi-scale retrieval with cluster summaries
 
   list                    List all documents in the library
     --tag <tag>           Filter by tag
@@ -518,7 +519,7 @@ Examples:
   pdf-brain ingest ./books --enrich  # Full metadata extraction
 `;
 
-function parseArgs(args: string[]) {
+export function parseArgs(args: string[]) {
   const result: Record<string, string | boolean> = {};
   let i = 0;
   while (i < args.length) {
@@ -687,6 +688,7 @@ const program = Effect.gen(function* () {
         : 0;
       const conceptsOnly = opts["concepts-only"] === true;
       const docsOnly = opts["docs-only"] === true;
+      const includeClusters = opts["include-clusters"] === true;
 
       // Determine what to search
       const searchDocs = !conceptsOnly;
@@ -759,7 +761,13 @@ const program = Effect.gen(function* () {
           ? yield* library.ftsSearch(query, new SearchOptions({ limit, tags }))
           : yield* library.search(
               query,
-              new SearchOptions({ limit, tags, hybrid: true, expandChars })
+              new SearchOptions({
+                limit,
+                tags,
+                hybrid: true,
+                expandChars,
+                includeClusterSummaries: includeClusters,
+              })
             );
 
         if (results.length > 0) {

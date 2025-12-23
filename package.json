@@ -1,7 +1,7 @@
 {
   "name": "pdf-brain",
-  "version": "1.1.1",
-  "description": "Local PDF knowledge base with vector search",
+  "version": "1.1.2",
+  "description": "Local PDF & Markdown knowledge base with semantic search, AI enrichment, and SKOS taxonomy",
   "type": "module",
   "main": "src/index.ts",
   "bin": {
@@ -23,6 +23,7 @@
     "@effect/platform": "^0.72.0",
     "@effect/platform-bun": "^0.52.0",
     "@effect/schema": "^0.75.0",
+    "@electric-sql/pglite": "^0.3.0",
     "@libsql/client": "^0.15.15",
     "ai": "^5.0.115",
     "dotenv": "^17.2.3",
@@ -58,11 +59,25 @@
   ],
   "keywords": [
     "pdf",
-    "vector-search",
-    "embeddings",
-    "libsql",
+    "markdown",
+    "md",
     "knowledge-base",
-    "effect-ts"
+    "vector-search",
+    "semantic-search",
+    "embeddings",
+    "rag",
+    "ollama",
+    "local-first",
+    "ai",
+    "llm",
+    "taxonomy",
+    "skos",
+    "libsql",
+    "mcp",
+    "effect-ts",
+    "document-management",
+    "personal-knowledge-base",
+    "pkm"
   ],
   "author": "Joel Hooks",
   "license": "MIT"

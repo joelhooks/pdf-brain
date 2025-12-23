@@ -1,25 +1,28 @@
 # pdf-brain
 
-Local PDF & Markdown knowledge base with semantic search and AI-powered enrichment.
+Local **PDF & Markdown** knowledge base with semantic search and AI-powered enrichment.
+
+> **Works with PDFs AND Markdown files** - Index your research papers, books, notes, docs, and any `.md` files in one unified, searchable knowledge base.
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   PDF/MD    │────▶│   Ollama    │────▶│   Ollama    │────▶│   libSQL    │
+│  PDF / MD   │────▶│   Ollama    │────▶│   Ollama    │────▶│   libSQL    │
 │  (extract)  │     │    (LLM)    │     │ (embeddings)│     │  (vectors)  │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
       │                   │                   │                   │
    pdf-parse         llama3.2:3b        mxbai-embed          HNSW index
-   markdown          enrichment          1024 dims           cosine sim
+   + markdown        enrichment          1024 dims           cosine sim
 ```
 
 ## Features
 
+- **PDF + Markdown** - Index `.pdf` and `.md` files with the same workflow
 - **Local-first** - Everything runs on your machine, no API costs
 - **AI enrichment** - LLM extracts titles, summaries, tags, and concepts
 - **SKOS taxonomy** - Organize documents with hierarchical concepts
 - **Vector search** - Semantic search via Ollama embeddings
 - **Hybrid search** - Combine vector similarity with full-text search
-- **Markdown support** - Index `.md` files alongside PDFs
+- **MCP server** - Use with Claude, Cursor, and other AI assistants
 
 ## Quick Start
 
@@ -105,16 +108,18 @@ pdf-brain init
 # Add a PDF
 pdf-brain add /path/to/document.pdf
 
-# Add from URL
+# Add a Markdown file
+pdf-brain add /path/to/notes.md
+
+# Add from URL (PDF or MD)
 pdf-brain add https://example.com/paper.pdf
+pdf-brain add https://raw.githubusercontent.com/user/repo/main/README.md
 
 # Add with manual tags
 pdf-brain add document.pdf --tags "ai,agents,research"
 
 # Add with AI enrichment (extracts title, summary, concepts)
 pdf-brain add document.pdf --enrich
-
-# Add Markdown file
 pdf-brain add notes.md --enrich
 ```
 
@@ -185,11 +190,16 @@ pdf-brain taxonomy seed --file data/taxonomy.json
 
 ### Bulk Ingest
 
+Recursively ingest directories containing PDFs and/or Markdown files:
+
 ```bash
 # Ingest a directory with full LLM enrichment
 pdf-brain ingest ~/Documents/papers --enrich
 
-# Ingest multiple directories
+# Ingest your Obsidian vault or notes folder
+pdf-brain ingest ~/Documents/obsidian --enrich
+
+# Ingest multiple directories (PDFs, Markdown, mixed)
 pdf-brain ingest ~/papers ~/books ~/notes --enrich
 
 # With manual tags
@@ -204,6 +214,11 @@ pdf-brain ingest ~/papers --enrich --sample 10
 # Disable TUI for simple output
 pdf-brain ingest ~/papers --enrich --no-tui
 ```
+
+**Supported formats:**
+
+- `.pdf` - Research papers, books, documents
+- `.md` - Notes, documentation, Obsidian vaults, READMEs
 
 ## Enrichment
 
@@ -394,6 +409,25 @@ pdf-brain config set enrichment.model anthropic/claude-haiku-4-5
 ├── library.db-shm      # Shared memory (WAL mode)
 ├── library.db-wal      # Write-ahead log
 └── downloads/          # PDFs downloaded from URLs
+```
+
+### Database Size
+
+The database can get **large** due to vector index overhead. For ~500k chunks:
+
+| Component    | Size   | Notes                             |
+| ------------ | ------ | --------------------------------- |
+| Text content | ~180MB | Actual chunk text                 |
+| Embeddings   | ~1.9GB | 500k × 1024 dims × 4 bytes        |
+| Vector index | ~48GB  | HNSW neighbor graphs (~100KB/row) |
+| FTS index    | ~200MB | Full-text search                  |
+
+The `*_idx_shadow` tables store HNSW neighbor graphs for approximate nearest neighbor search. Each row averages ~100KB.
+
+**libSQL quirk**: `SELECT COUNT(*) FROM embeddings` returns 0. Always count a specific column:
+
+```sql
+SELECT COUNT(chunk_id) FROM embeddings  -- correct
 ```
 
 ## How It Works

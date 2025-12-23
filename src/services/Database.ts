@@ -92,5 +92,23 @@ export class Database extends Context.Tag("Database")<
 
     // Backup/restore
     readonly dumpDataDir: () => Effect.Effect<Blob, DatabaseError>;
+
+    // Streaming operations (for large datasets)
+    readonly streamEmbeddings: (
+      batchSize: number
+    ) => AsyncGenerator<
+      Array<{ chunkId: string; embedding: number[] }>,
+      void,
+      unknown
+    >;
+
+    // Bulk operations (for batch processing)
+    readonly bulkInsertClusterAssignments: (
+      assignments: Array<{
+        chunkId: string;
+        clusterId: number;
+        distance: number;
+      }>
+    ) => Effect.Effect<void, DatabaseError>;
   }
 >() {}

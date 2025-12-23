@@ -255,6 +255,10 @@ export class SearchOptions extends Schema.Class<SearchOptions>("SearchOptions")(
     entityTypes: Schema.optional(
       Schema.Array(Schema.Literal("document", "concept"))
     ),
+    /** Include cluster summaries in search results (RAPTOR-style multi-scale retrieval). Default: false */
+    includeClusterSummaries: Schema.optionalWith(Schema.Boolean, {
+      default: () => false,
+    }),
   }
 ) {}
 

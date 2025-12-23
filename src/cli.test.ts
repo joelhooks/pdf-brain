@@ -7,6 +7,7 @@ import {
   MARKDOWN_INDICATORS,
   getCheckpointInterval,
   shouldCheckpoint,
+  parseArgs,
 } from "./cli.js";
 
 describe("filenameFromURL", () => {
@@ -311,4 +312,49 @@ describe("automatic checkpoint during batch operations", () => {
 
     expect(checkpointedAt).toEqual([50, 100]);
   });
+});
+
+describe("CLI integration: search with --include-clusters", () => {
+  test("parseArgs handles --include-clusters flag", () => {
+    const args = [
+      "search",
+      "machine learning",
+      "--include-clusters",
+      "--limit",
+      "5",
+    ];
+    const opts = parseArgs(args.slice(2)); // Skip command and query
+
+    expect(opts["include-clusters"]).toBe(true);
+    expect(opts.limit).toBe("5");
+  });
+
+  test("parseArgs handles search without --include-clusters", () => {
+    const args = ["search", "query", "--limit", "10"];
+    const opts = parseArgs(args.slice(2));
+
+    expect(opts["include-clusters"]).toBeUndefined();
+  });
+});
+
+describe("CLI integration: cluster command with --soft flag", () => {
+  test("parseArgs handles --soft flag for soft clustering", () => {
+    const args = ["cluster", "--soft", "--k", "10"];
+    const opts = parseArgs(args.slice(1)); // Skip command
+
+    expect(opts.soft).toBe(true);
+    expect(opts.k).toBe("10");
+  });
+
+  test("parseArgs handles cluster without --soft (hard k-means)", () => {
+    const args = ["cluster", "--k", "20"];
+    const opts = parseArgs(args.slice(1));
+
+    expect(opts.soft).toBeUndefined();
+    expect(opts.k).toBe("20");
+  });
+
+  // NOTE: Full cluster command integration test deferred
+  // The cluster command implementation is part of a separate cell/PR
+  // This cell focuses on CLI argument parsing and wiring flags to services
 });

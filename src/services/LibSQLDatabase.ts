@@ -388,6 +388,14 @@ export class LibSQLDatabase {
 
                 // LibSQL FTS5 uses MATCH syntax
                 // FTS5 rank() returns NEGATIVE scores - more negative = better match
+                //
+                // IMPORTANT: FTS5 has special query syntax where characters like
+                // - (NOT), * (prefix), " (phrase), : (column), etc. have meaning.
+                // We need to escape the query to treat it as a literal phrase search.
+                // Wrap the entire query in double quotes for phrase matching,
+                // and escape any internal double quotes.
+                const escapedQuery = `"${query.replace(/"/g, '""')}"`;
+
                 let sql = `
                   SELECT 
                     c.doc_id,
@@ -402,7 +410,7 @@ export class LibSQLDatabase {
                   WHERE fts.content MATCH ?
                 `;
 
-                const args: any[] = [query];
+                const args: any[] = [escapedQuery];
 
                 if (tags && tags.length > 0) {
                   // Filter by tags using json_each

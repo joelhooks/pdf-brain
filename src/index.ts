@@ -20,7 +20,12 @@ import {
 } from "./types.js";
 import { DEFAULT_QUEUE_CONFIG } from "./services/EmbeddingQueue.js";
 
-import { Ollama, OllamaLive } from "./services/Ollama.js";
+import {
+  Ollama,
+  OllamaLive,
+  probeEmbeddingDimension,
+  getEmbeddingDimension,
+} from "./services/Ollama.js";
 import { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
 import {
   MarkdownExtractor,
@@ -31,7 +36,12 @@ import { LibSQLDatabase } from "./services/LibSQLDatabase.js";
 
 // Re-export types and services
 export * from "./types.js";
-export { Ollama, OllamaLive } from "./services/Ollama.js";
+export {
+  Ollama,
+  OllamaLive,
+  probeEmbeddingDimension,
+  getEmbeddingDimension,
+} from "./services/Ollama.js";
 export { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
 export {
   MarkdownExtractor,
@@ -90,7 +100,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
               new DocumentExistsError({
                 title: existing.title,
                 path: resolvedPath,
-              })
+              }),
             );
           }
 
@@ -116,7 +126,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
           } else if (isMarkdown) {
             // For markdown: try frontmatter title, then first H1, then filename
             const frontmatterResult = yield* Effect.either(
-              markdownExtractor.extractFrontmatter(resolvedPath)
+              markdownExtractor.extractFrontmatter(resolvedPath),
             );
 
             if (
@@ -128,14 +138,14 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             } else {
               // Try first H1 from sections
               const extractResult = yield* Effect.either(
-                markdownExtractor.extract(resolvedPath)
+                markdownExtractor.extract(resolvedPath),
               );
               if (
                 extractResult._tag === "Right" &&
                 extractResult.right.sections.length > 0
               ) {
                 const firstH1 = extractResult.right.sections.find(
-                  (s) => s.heading
+                  (s) => s.heading,
                 );
                 title =
                   firstH1?.heading ||
@@ -159,11 +169,11 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
 
           if (isMarkdown) {
             const processResult = yield* Effect.either(
-              markdownExtractor.process(resolvedPath)
+              markdownExtractor.process(resolvedPath),
             );
             if (processResult._tag === "Left") {
               yield* Effect.log(
-                `Markdown extraction failed for ${resolvedPath}: ${processResult.left}`
+                `Markdown extraction failed for ${resolvedPath}: ${processResult.left}`,
               );
               return yield* Effect.fail(processResult.left);
             }
@@ -171,11 +181,11 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             chunks = processResult.right.chunks;
           } else {
             const processResult = yield* Effect.either(
-              pdfExtractor.process(resolvedPath)
+              pdfExtractor.process(resolvedPath),
             );
             if (processResult._tag === "Left") {
               yield* Effect.log(
-                `PDF extraction failed for ${resolvedPath}: ${processResult.left}`
+                `PDF extraction failed for ${resolvedPath}: ${processResult.left}`,
               );
               return yield* Effect.fail(processResult.left);
             }
@@ -187,7 +197,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             return yield* Effect.fail(
               new DocumentNotFoundError({
                 query: `No text content extracted from ${fileType}`,
-              })
+              }),
             );
           }
 
@@ -222,30 +232,54 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
           // to keep WAL size bounded and prevent daemon crashes
           const batchSize = DEFAULT_QUEUE_CONFIG.batchSize;
           yield* Effect.log(
-            `Generating embeddings for ${chunks.length} chunks (batch size: ${batchSize})...`
+            `Generating embeddings for ${chunks.length} chunks (batch size: ${batchSize})...`,
           );
 
           const contents = chunks.map((c) => c.content);
 
           // Process embeddings in gated batches
           // Each batch: generate embeddings → write to DB → checkpoint
-          let batchStart = 0;
-
-          while (batchStart < contents.length) {
+          for (
+            let batchIdx = 0;
+            batchIdx * batchSize < contents.length;
+            batchIdx++
+          ) {
+            const batchStart = batchIdx * batchSize;
             const batchEnd = Math.min(batchStart + batchSize, contents.length);
             const batchContents = contents.slice(batchStart, batchEnd);
+
+            yield* Effect.log(
+              `  Batch ${batchIdx}: generating embeddings for indices ${batchStart}-${batchEnd - 1}`,
+            );
 
             // Generate embeddings for this batch with bounded concurrency
             const batchEmbeddings = yield* ollama.embedBatch(
               batchContents,
-              DEFAULT_QUEUE_CONFIG.concurrency
+              DEFAULT_QUEUE_CONFIG.concurrency,
+            );
+
+            yield* Effect.log(
+              `  Batch ${batchIdx}: got ${batchEmbeddings.length} embeddings`,
             );
 
             // Store this batch's embeddings
-            const embeddingRecords = batchEmbeddings.map((emb, i) => ({
-              chunkId: `${id}-${batchStart + i}`,
-              embedding: emb,
-            }));
+            // NOTE: Use explicit for-loop to avoid Effect generator closure issues
+            // The .map() closure was capturing stale batchStart values
+            const embeddingRecords: Array<{
+              chunkId: string;
+              embedding: number[];
+            }> = [];
+            for (let i = 0; i < batchEmbeddings.length; i++) {
+              const chunkIndex = batchIdx * batchSize + i;
+              embeddingRecords.push({
+                chunkId: `${id}-${chunkIndex}`,
+                embedding: batchEmbeddings[i],
+              });
+            }
+
+            yield* Effect.log(
+              `  Batch ${batchIdx}: inserting ${embeddingRecords[0]?.chunkId} to ${embeddingRecords[embeddingRecords.length - 1]?.chunkId}`,
+            );
             yield* db.addEmbeddings(embeddingRecords);
 
             // CRITICAL: Checkpoint after each batch to flush WAL
@@ -253,15 +287,13 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             yield* db.checkpoint();
 
             yield* Effect.log(
-              `  Processed ${batchEnd}/${contents.length} embeddings`
+              `  Processed ${batchEnd}/${contents.length} embeddings`,
             );
 
-            batchStart = batchEnd;
-
             // Backpressure: small delay between batches to let GC run
-            if (batchStart < contents.length) {
+            if (batchEnd < contents.length) {
               yield* Effect.sleep(
-                Duration.millis(DEFAULT_QUEUE_CONFIG.batchDelayMs)
+                Duration.millis(DEFAULT_QUEUE_CONFIG.batchDelayMs),
               );
             }
           }
@@ -283,7 +315,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             const queryEmbedding = yield* ollama.embed(query);
             const vectorResults = yield* db.vectorSearch(
               queryEmbedding,
-              options
+              options,
             );
             results.push(...vectorResults);
           }
@@ -298,7 +330,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
                 (r) =>
                   r.docId === fts.docId &&
                   r.page === fts.page &&
-                  r.chunkIndex === fts.chunkIndex
+                  r.chunkIndex === fts.chunkIndex,
               );
               if (!exists) {
                 results.push(fts);
@@ -356,7 +388,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
                   const expanded = yield* db.getExpandedContext(
                     result.docId,
                     result.chunkIndex,
-                    { maxChars: expandChars }
+                    { maxChars: expandChars },
                   );
 
                   // Cache for deduplication
@@ -374,8 +406,8 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
                       end: expanded.endIndex,
                     },
                   });
-                })
-              )
+                }),
+              ),
             );
           }
 
@@ -387,7 +419,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
        */
       ftsSearch: (
         query: string,
-        options: SearchOptions = new SearchOptions({})
+        options: SearchOptions = new SearchOptions({}),
       ) => db.ftsSearch(query, options),
 
       /**
@@ -410,7 +442,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             docs.find(
               (d) =>
                 d.title.toLowerCase().includes(idOrTitle.toLowerCase()) ||
-                d.id.startsWith(idOrTitle)
+                d.id.startsWith(idOrTitle),
             ) || null
           );
         }),
@@ -430,15 +462,15 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
                 docs.find(
                   (d) =>
                     d.title.toLowerCase().includes(id.toLowerCase()) ||
-                    d.id.startsWith(id)
+                    d.id.startsWith(id),
                 ) || null
               );
-            })
+            }),
           );
 
           if (!doc) {
             return yield* Effect.fail(
-              new DocumentNotFoundError({ query: idOrTitle })
+              new DocumentNotFoundError({ query: idOrTitle }),
             );
           }
 
@@ -461,15 +493,15 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
                 docs.find(
                   (d) =>
                     d.title.toLowerCase().includes(id.toLowerCase()) ||
-                    d.id.startsWith(id)
+                    d.id.startsWith(id),
                 ) || null
               );
-            })
+            }),
           );
 
           if (!doc) {
             return yield* Effect.fail(
-              new DocumentNotFoundError({ query: idOrTitle })
+              new DocumentNotFoundError({ query: idOrTitle }),
             );
           }
 
@@ -510,11 +542,59 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
 // ============================================================================
 
 /**
+ * Known embedding dimensions for common models
+ */
+const MODEL_DIMENSIONS: Record<string, number> = {
+  "mxbai-embed-large": 1024,
+  "nomic-embed-text": 768,
+  "all-minilm": 384,
+  "bge-small-en": 384,
+  "bge-base-en": 768,
+  "bge-large-en": 1024,
+};
+
+/**
+ * Get embedding dimension for a model (from known list or default)
+ */
+function getModelDimension(model: string): number {
+  // Check exact match first
+  if (MODEL_DIMENSIONS[model]) {
+    return MODEL_DIMENSIONS[model];
+  }
+  // Check prefix match (e.g., "nomic-embed-text:latest")
+  for (const [key, dim] of Object.entries(MODEL_DIMENSIONS)) {
+    if (model.startsWith(key)) {
+      return dim;
+    }
+  }
+  // Default to mxbai-embed-large dimension
+  return 1024;
+}
+
+/**
  * Full application layer with all services using LibSQL database
+ * Automatically detects embedding dimension from configured model
  */
 export const PDFLibraryLive = (() => {
-  const config = LibraryConfig.fromEnv();
-  const dbLayer = LibSQLDatabase.make({ url: `file:${config.dbPath}` });
+  const libraryConfig = LibraryConfig.fromEnv();
+
+  // Load config to get the embedding model
+  let embeddingDim = 1024; // default
+  try {
+    const { loadConfig } = require("./types.js");
+    const config = loadConfig();
+    embeddingDim = getModelDimension(config.embedding.model);
+    console.log(
+      `[PDFLibrary] Using embedding dimension ${embeddingDim} for model ${config.embedding.model}`,
+    );
+  } catch {
+    // Config not available yet, use default
+  }
+
+  const dbLayer = LibSQLDatabase.make({
+    url: `file:${libraryConfig.dbPath}`,
+    embeddingDimension: embeddingDim,
+  });
 
   return PDFLibrary.Default.pipe(Layer.provide(dbLayer));
 })();

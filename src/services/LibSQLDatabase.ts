@@ -10,8 +10,11 @@ import { createClient, type Client } from "@libsql/client";
 import { Database } from "./Database.js";
 import { DatabaseError, Document } from "../types.js";
 
-// Embedding dimension for mxbai-embed-large (used for both documents and concepts)
-const EMBEDDING_DIM = 1024;
+// Default embedding dimension (mxbai-embed-large)
+// Can be overridden via config for other models:
+// - nomic-embed-text: 768
+// - all-minilm: 384
+const DEFAULT_EMBEDDING_DIM = 1024;
 
 // ============================================================================
 // LibSQLDatabase Service
@@ -24,8 +27,16 @@ export class LibSQLDatabase {
    * @param config - Connection configuration
    *   - url: ":memory:" for in-memory, "file:./path.db" for local file, or remote URL
    *   - authToken: Optional auth token for Turso/remote databases
+   *   - embeddingDimension: Vector dimension for embeddings (default: 1024 for mxbai-embed-large)
+   *     Use 768 for nomic-embed-text, 384 for all-minilm, etc.
    */
-  static make(config: { url: string; authToken?: string }) {
+  static make(config: {
+    url: string;
+    authToken?: string;
+    embeddingDimension?: number;
+  }) {
+    const embeddingDim = config.embeddingDimension ?? DEFAULT_EMBEDDING_DIM;
+
     return Layer.scoped(
       Database,
       Effect.gen(function* () {
@@ -35,10 +46,10 @@ export class LibSQLDatabase {
           authToken: config.authToken,
         });
 
-        // Initialize schema
+        // Initialize schema with configured embedding dimension
         yield* Effect.tryPromise({
           try: async () => {
-            await initSchema(client);
+            await initSchema(client, embeddingDim);
           },
           catch: (e) =>
             new DatabaseError({ reason: `Schema init failed: ${e}` }),
@@ -48,7 +59,7 @@ export class LibSQLDatabase {
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
             client.close();
-          })
+          }),
         );
 
         // Helper to parse document row
@@ -227,17 +238,17 @@ export class LibSQLDatabase {
                         tags
                           .map(
                             () =>
-                              "EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
+                              "EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)",
                           )
                           .join(" OR ") +
-                        ")"
+                        ")",
                     );
                     chunkArgs.push(...tags);
                   }
 
                   if (maxDistance !== null) {
                     chunkConditions.push(
-                      `vector_distance_cos(e.embedding, vector32(?)) <= ?`
+                      `vector_distance_cos(e.embedding, vector32(?)) <= ?`,
                     );
                     chunkArgs.push(queryVec, maxDistance);
                   }
@@ -270,7 +281,7 @@ export class LibSQLDatabase {
 
                   if (maxDistance !== null) {
                     clusterConditions.push(
-                      `vector_distance_cos(cs.embedding, vector32(?)) <= ?`
+                      `vector_distance_cos(cs.embedding, vector32(?)) <= ?`,
                     );
                     clusterArgs.push(queryVec, maxDistance);
                   }
@@ -337,10 +348,10 @@ export class LibSQLDatabase {
                       tags
                         .map(
                           () =>
-                            "EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)"
+                            "EXISTS (SELECT 1 FROM json_each(d.tags) WHERE value = ?)",
                         )
                         .join(" OR ") +
-                      ")"
+                      ")",
                   );
                   args.push(...tags);
                 }
@@ -351,7 +362,7 @@ export class LibSQLDatabase {
                 if (threshold > 0) {
                   const maxDistance = 2 * (1 - threshold);
                   conditions.push(
-                    `vector_distance_cos(e.embedding, vector32(?)) <= ?`
+                    `vector_distance_cos(e.embedding, vector32(?)) <= ?`,
                   );
                   args.push(queryVec, maxDistance);
                 }
@@ -375,7 +386,7 @@ export class LibSQLDatabase {
                       // Convert distance to similarity score: score = 1 - distance/2
                       score: 1 - Number(row.distance) / 2,
                       matchType: "vector",
-                    } as any)
+                    }) as any,
                 );
               },
               catch: (e) => new DatabaseError({ reason: String(e) }),
@@ -439,7 +450,7 @@ export class LibSQLDatabase {
                       // Negate score to make it positive for consistency
                       score: Math.abs(Number(row.score)),
                       matchType: "fts",
-                    } as any)
+                    }) as any,
                 );
               },
               catch: (e) => new DatabaseError({ reason: String(e) }),
@@ -527,13 +538,13 @@ export class LibSQLDatabase {
             Effect.tryPromise({
               try: async () => {
                 const docs = await client.execute(
-                  "SELECT COUNT(*) as count FROM documents"
+                  "SELECT COUNT(*) as count FROM documents",
                 );
                 const chunks = await client.execute(
-                  "SELECT COUNT(*) as count FROM chunks"
+                  "SELECT COUNT(*) as count FROM chunks",
                 );
                 const embeddings = await client.execute(
-                  "SELECT COUNT(*) as count FROM embeddings"
+                  "SELECT COUNT(*) as count FROM embeddings",
                 );
 
                 return {
@@ -554,7 +565,7 @@ export class LibSQLDatabase {
                   WHERE NOT EXISTS (SELECT 1 FROM documents d WHERE d.id = c.doc_id)
                 `);
                 const orphanedChunks = Number(
-                  (orphanedChunksResult.rows[0] as any).count
+                  (orphanedChunksResult.rows[0] as any).count,
                 );
 
                 // Count orphaned embeddings
@@ -563,7 +574,7 @@ export class LibSQLDatabase {
                   WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.id = e.chunk_id)
                 `);
                 const orphanedEmbeddings = Number(
-                  (orphanedEmbeddingsResult.rows[0] as any).count
+                  (orphanedEmbeddingsResult.rows[0] as any).count,
                 );
 
                 // Delete orphaned embeddings first
@@ -607,7 +618,7 @@ export class LibSQLDatabase {
             Effect.fail(
               new DatabaseError({
                 reason: "dumpDataDir not supported for LibSQL",
-              })
+              }),
             ),
 
           streamEmbeddings: async function* (batchSize: number) {
@@ -652,7 +663,7 @@ export class LibSQLDatabase {
               catch: (e) => new DatabaseError({ reason: String(e) }),
             }),
         };
-      })
+      }),
     );
   }
 }
@@ -661,7 +672,7 @@ export class LibSQLDatabase {
 // Schema Initialization
 // ============================================================================
 
-async function initSchema(client: Client): Promise<void> {
+async function initSchema(client: Client, embeddingDim: number): Promise<void> {
   // Set busy timeout to wait up to 30s for locks instead of failing immediately
   await client.execute("PRAGMA busy_timeout = 30000");
 
@@ -697,22 +708,22 @@ async function initSchema(client: Client): Promise<void> {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS embeddings (
       chunk_id TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-      embedding F32_BLOB(${EMBEDDING_DIM}) NOT NULL
+      embedding F32_BLOB(${embeddingDim}) NOT NULL
     )
   `);
 
   // Create indexes
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)`
+    `CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)`,
   );
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_docs_path ON documents(path)`
+    `CREATE INDEX IF NOT EXISTS idx_docs_path ON documents(path)`,
   );
 
   // Vector index for fast ANN search (DiskANN algorithm)
   // compress_neighbors=float8 reduces index size ~4x with minimal recall loss (~1-2%)
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS embeddings_idx ON embeddings(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`
+    `CREATE INDEX IF NOT EXISTS embeddings_idx ON embeddings(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`,
   );
 
   // FTS5 virtual table for full-text search
@@ -792,33 +803,33 @@ async function initSchema(client: Client): Promise<void> {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS concept_embeddings (
       concept_id TEXT PRIMARY KEY REFERENCES concepts(id) ON DELETE CASCADE,
-      embedding F32_BLOB(${EMBEDDING_DIM}) NOT NULL
+      embedding F32_BLOB(${embeddingDim}) NOT NULL
     )
   `);
 
   // Taxonomy indexes for efficient hierarchy traversal
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_concept_hierarchy_concept ON concept_hierarchy(concept_id)`
+    `CREATE INDEX IF NOT EXISTS idx_concept_hierarchy_concept ON concept_hierarchy(concept_id)`,
   );
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_concept_hierarchy_broader ON concept_hierarchy(broader_id)`
+    `CREATE INDEX IF NOT EXISTS idx_concept_hierarchy_broader ON concept_hierarchy(broader_id)`,
   );
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_concept_relations_concept ON concept_relations(concept_id)`
+    `CREATE INDEX IF NOT EXISTS idx_concept_relations_concept ON concept_relations(concept_id)`,
   );
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_concept_relations_related ON concept_relations(related_id)`
+    `CREATE INDEX IF NOT EXISTS idx_concept_relations_related ON concept_relations(related_id)`,
   );
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_document_concepts_doc ON document_concepts(doc_id)`
+    `CREATE INDEX IF NOT EXISTS idx_document_concepts_doc ON document_concepts(doc_id)`,
   );
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_document_concepts_concept ON document_concepts(concept_id)`
+    `CREATE INDEX IF NOT EXISTS idx_document_concepts_concept ON document_concepts(concept_id)`,
   );
 
   // Vector index for concept embeddings (same compression as document embeddings)
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS concept_embeddings_idx ON concept_embeddings(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`
+    `CREATE INDEX IF NOT EXISTS concept_embeddings_idx ON concept_embeddings(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`,
   );
 
   // ============================================================================
@@ -848,9 +859,9 @@ async function initSchema(client: Client): Promise<void> {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS cluster_summaries (
       id INTEGER PRIMARY KEY,
-      centroid F32_BLOB(${EMBEDDING_DIM}),
+      centroid F32_BLOB(${embeddingDim}),
       summary TEXT,
-      embedding F32_BLOB(${EMBEDDING_DIM}),
+      embedding F32_BLOB(${embeddingDim}),
       concept_id TEXT,
       concept_confidence REAL,
       chunk_count INTEGER NOT NULL,
@@ -860,15 +871,15 @@ async function initSchema(client: Client): Promise<void> {
 
   // Indexes for efficient cluster queries
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_chunk_clusters_cluster ON chunk_clusters(cluster_id)`
+    `CREATE INDEX IF NOT EXISTS idx_chunk_clusters_cluster ON chunk_clusters(cluster_id)`,
   );
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS idx_cluster_summaries_concept ON cluster_summaries(concept_id)`
+    `CREATE INDEX IF NOT EXISTS idx_cluster_summaries_concept ON cluster_summaries(concept_id)`,
   );
 
   // Vector index for cluster summary embeddings (for multi-scale retrieval)
   await client.execute(
-    `CREATE INDEX IF NOT EXISTS cluster_summaries_idx ON cluster_summaries(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`
+    `CREATE INDEX IF NOT EXISTS cluster_summaries_idx ON cluster_summaries(libsql_vector_idx(embedding, 'compress_neighbors=float8'))`,
   );
 
   // Triggers to keep FTS5 in sync with chunks table

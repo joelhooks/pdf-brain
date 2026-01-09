@@ -24,7 +24,7 @@ export class Ollama extends Context.Tag("Ollama")<
     readonly embed: (text: string) => Effect.Effect<number[], OllamaError>;
     readonly embedBatch: (
       texts: string[],
-      concurrency?: number
+      concurrency?: number,
     ) => Effect.Effect<number[][], OllamaError>;
     readonly checkHealth: () => Effect.Effect<void, OllamaError>;
   }
@@ -43,35 +43,53 @@ interface OllamaTagsResponse {
 }
 
 /**
- * Expected embedding dimension for mxbai-embed-large model
+ * Detected embedding dimension (set on first embedding call)
+ * Different models have different dimensions:
+ * - mxbai-embed-large: 1024
+ * - nomic-embed-text: 768
+ * - all-minilm: 384
  */
-const EXPECTED_EMBEDDING_DIMENSION = 1024;
+let detectedEmbeddingDimension: number | null = null;
+
+/**
+ * Get the detected embedding dimension (for use by database schema)
+ */
+export function getEmbeddingDimension(): number | null {
+  return detectedEmbeddingDimension;
+}
 
 /**
  * Validates embedding dimensions and values before database insert
  *
- * Prevents "different vector dimensions 1024 and 0" errors that cause
- * PGlite WAL accumulation and database corruption.
+ * On first call, records the dimension for consistency checking.
+ * Subsequent calls verify dimension matches the first.
  *
  * @param embedding - The embedding vector to validate
  * @returns Effect that fails with OllamaError if invalid
  */
 function validateEmbedding(
-  embedding: number[]
+  embedding: number[],
 ): Effect.Effect<number[], OllamaError> {
   if (embedding.length === 0) {
     return Effect.fail(
       new OllamaError({
-        reason: `Invalid embedding: dimension 0 (expected ${EXPECTED_EMBEDDING_DIMENSION})`,
-      })
+        reason: "Invalid embedding: dimension 0 (empty vector)",
+      }),
     );
   }
 
-  if (embedding.length !== EXPECTED_EMBEDDING_DIMENSION) {
+  // First embedding sets the expected dimension
+  if (detectedEmbeddingDimension === null) {
+    detectedEmbeddingDimension = embedding.length;
+    console.log(
+      `[Ollama] Detected embedding dimension: ${detectedEmbeddingDimension}`,
+    );
+  } else if (embedding.length !== detectedEmbeddingDimension) {
+    // Subsequent embeddings must match
     return Effect.fail(
       new OllamaError({
-        reason: `Invalid embedding: dimension ${embedding.length} (expected ${EXPECTED_EMBEDDING_DIMENSION})`,
-      })
+        reason: `Invalid embedding: dimension ${embedding.length} (expected ${detectedEmbeddingDimension})`,
+      }),
     );
   }
 
@@ -80,7 +98,7 @@ function validateEmbedding(
       new OllamaError({
         reason:
           "Invalid embedding: contains non-finite values (NaN or Infinity)",
-      })
+      }),
     );
   }
 
@@ -94,7 +112,7 @@ function validateEmbedding(
  */
 function autoInstallModel(
   model: string,
-  host: string
+  host: string,
 ): Effect.Effect<void, OllamaError> {
   console.log(`[Ollama] Installing model ${model}...`);
 
@@ -112,8 +130,8 @@ function autoInstallModel(
           } else {
             reject(
               new Error(
-                `ollama pull exited with code ${code}. Ensure Ollama is running and the model name is valid.`
-              )
+                `ollama pull exited with code ${code}. Ensure Ollama is running and the model name is valid.`,
+              ),
             );
           }
         });
@@ -121,8 +139,8 @@ function autoInstallModel(
         proc.on("error", (err) => {
           reject(
             new Error(
-              `Failed to spawn ollama pull: ${err.message}. Ensure Ollama CLI is installed.`
-            )
+              `Failed to spawn ollama pull: ${err.message}. Ensure Ollama CLI is installed.`,
+            ),
           );
         });
       }),
@@ -132,6 +150,56 @@ function autoInstallModel(
           e instanceof Error ? e.message : String(e)
         }`,
       }),
+  });
+}
+
+/**
+ * Probe the embedding model to detect its dimension
+ * Call this BEFORE creating database schema
+ */
+export function probeEmbeddingDimension(
+  host: string,
+  model: string,
+): Effect.Effect<number, OllamaError> {
+  return Effect.gen(function* () {
+    const response = yield* Effect.tryPromise({
+      try: () =>
+        fetch(`${host}/api/embeddings`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            prompt: "dimension probe",
+          }),
+        }),
+      catch: (e) => new OllamaError({ reason: `Connection failed: ${e}` }),
+    });
+
+    if (!response.ok) {
+      const error = yield* Effect.tryPromise({
+        try: () => response.text(),
+        catch: () =>
+          new OllamaError({ reason: "Failed to read error response" }),
+      });
+      return yield* Effect.fail(new OllamaError({ reason: error }));
+    }
+
+    const data = yield* Effect.tryPromise({
+      try: () => response.json() as Promise<OllamaEmbeddingResponse>,
+      catch: () => new OllamaError({ reason: "Invalid JSON response" }),
+    });
+
+    const dimension = data.embedding?.length ?? 0;
+    if (dimension === 0) {
+      return yield* Effect.fail(
+        new OllamaError({ reason: "Probe returned empty embedding" }),
+      );
+    }
+
+    // Cache the detected dimension
+    detectedEmbeddingDimension = dimension;
+    console.log(`[Ollama] Probed embedding dimension: ${dimension}`);
+    return dimension;
   });
 }
 
@@ -175,9 +243,9 @@ export const OllamaLive = Layer.effect(
         // Retry with exponential backoff on transient failures
         Effect.retry(
           Schedule.exponential(Duration.millis(100)).pipe(
-            Schedule.compose(Schedule.recurs(3))
-          )
-        )
+            Schedule.compose(Schedule.recurs(3)),
+          ),
+        ),
       );
 
     return {
@@ -187,7 +255,7 @@ export const OllamaLive = Layer.effect(
         Stream.fromIterable(texts).pipe(
           Stream.mapEffect(embedSingle, { concurrency }),
           Stream.runCollect,
-          Effect.map(Chunk.toArray)
+          Effect.map(Chunk.toArray),
         ),
 
       checkHealth: () =>
@@ -202,7 +270,7 @@ export const OllamaLive = Layer.effect(
 
           if (!response.ok) {
             return yield* Effect.fail(
-              new OllamaError({ reason: "Ollama not responding" })
+              new OllamaError({ reason: "Ollama not responding" }),
             );
           }
 
@@ -214,7 +282,7 @@ export const OllamaLive = Layer.effect(
 
           const modelName = config.embedding.model;
           const hasModel = data.models.some(
-            (m) => m.name === modelName || m.name.startsWith(`${modelName}:`)
+            (m) => m.name === modelName || m.name.startsWith(`${modelName}:`),
           );
 
           if (!hasModel) {
@@ -225,11 +293,11 @@ export const OllamaLive = Layer.effect(
               return yield* Effect.fail(
                 new OllamaError({
                   reason: `Model ${modelName} not found. Run: ollama pull ${modelName}`,
-                })
+                }),
               );
             }
           }
         }),
     };
-  })
+  }),
 );

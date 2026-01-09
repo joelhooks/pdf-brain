@@ -22,12 +22,12 @@ import { LibraryConfig } from "../types.js";
 
 export class MarkdownNotFoundError extends Schema.TaggedError<MarkdownNotFoundError>()(
   "MarkdownNotFoundError",
-  { path: Schema.String }
+  { path: Schema.String },
 ) {}
 
 export class MarkdownExtractionError extends Schema.TaggedError<MarkdownExtractionError>()(
   "MarkdownExtractionError",
-  { path: Schema.String, reason: Schema.String }
+  { path: Schema.String, reason: Schema.String },
 ) {}
 
 // ============================================================================
@@ -83,7 +83,7 @@ export class MarkdownExtractor extends Context.Tag("MarkdownExtractor")<
      * Extract markdown into sections with frontmatter
      */
     readonly extract: (
-      path: string
+      path: string,
     ) => Effect.Effect<
       ExtractedMarkdown,
       MarkdownExtractionError | MarkdownNotFoundError
@@ -105,7 +105,7 @@ export class MarkdownExtractor extends Context.Tag("MarkdownExtractor")<
      * Extract frontmatter only (fast path for title extraction)
      */
     readonly extractFrontmatter: (
-      path: string
+      path: string,
     ) => Effect.Effect<
       MarkdownFrontmatter,
       MarkdownExtractionError | MarkdownNotFoundError
@@ -237,32 +237,165 @@ function extractFrontmatterData(content: string): MarkdownFrontmatter {
 }
 
 /**
+ * Split a large code block into smaller chunks while preserving syntax
+ *
+ * @param code - The code content (without backticks)
+ * @param lang - The language identifier
+ * @param maxSize - Maximum size per chunk
+ * @returns Array of code block strings with backticks
+ */
+function splitCodeBlock(code: string, lang: string, maxSize: number): string[] {
+  const lines = code.split("\n");
+  const chunks: string[] = [];
+  let currentLines: string[] = [];
+  let currentLength = 0;
+
+  // Account for backticks and language tag overhead
+  const overhead = lang.length + 8; // ```lang\n...\n```
+  const effectiveMax = maxSize - overhead;
+
+  for (const line of lines) {
+    const lineLength = line.length + 1; // +1 for newline
+
+    if (currentLength + lineLength > effectiveMax && currentLines.length > 0) {
+      // Flush current chunk
+      chunks.push(`\`\`\`${lang}\n${currentLines.join("\n")}\n\`\`\``);
+      currentLines = [];
+      currentLength = 0;
+    }
+
+    currentLines.push(line);
+    currentLength += lineLength;
+  }
+
+  // Flush remaining
+  if (currentLines.length > 0) {
+    chunks.push(`\`\`\`${lang}\n${currentLines.join("\n")}\n\`\`\``);
+  }
+
+  return chunks;
+}
+
+/**
+ * Pre-process text to split large code blocks before chunking
+ * This prevents the "restore code block" step from blowing up chunk sizes
+ *
+ * @param text - Raw markdown text
+ * @param maxCodeBlockSize - Maximum size for a single code block
+ * @returns Text with large code blocks split into smaller ones
+ */
+function preprocessLargeCodeBlocks(
+  text: string,
+  maxCodeBlockSize: number,
+): string {
+  return text.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
+    if (match.length <= maxCodeBlockSize) {
+      return match; // Small enough, keep as-is
+    }
+
+    // Split large code block
+    const chunks = splitCodeBlock(code.trim(), lang || "", maxCodeBlockSize);
+    return chunks.join("\n\n");
+  });
+}
+
+/**
+ * Split a large table into smaller chunks
+ *
+ * @param table - The full table markdown
+ * @param maxSize - Maximum size per chunk
+ * @returns Array of table chunks (each with header)
+ */
+function splitTable(table: string, maxSize: number): string[] {
+  const lines = table.trim().split("\n");
+  if (lines.length < 3) return [table]; // Need at least header + separator + 1 row
+
+  const header = lines[0];
+  const separator = lines[1];
+  const rows = lines.slice(2);
+
+  const headerOverhead = header.length + separator.length + 2;
+  const effectiveMax = maxSize - headerOverhead;
+
+  const chunks: string[] = [];
+  let currentRows: string[] = [];
+  let currentLength = 0;
+
+  for (const row of rows) {
+    const rowLength = row.length + 1;
+
+    if (currentLength + rowLength > effectiveMax && currentRows.length > 0) {
+      chunks.push([header, separator, ...currentRows].join("\n"));
+      currentRows = [];
+      currentLength = 0;
+    }
+
+    currentRows.push(row);
+    currentLength += rowLength;
+  }
+
+  if (currentRows.length > 0) {
+    chunks.push([header, separator, ...currentRows].join("\n"));
+  }
+
+  return chunks;
+}
+
+/**
+ * Pre-process text to split large tables
+ */
+function preprocessLargeTables(text: string, maxTableSize: number): string {
+  // Match markdown tables: header | separator | rows
+  return text.replace(
+    /(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)/g,
+    (match) => {
+      if (match.length <= maxTableSize) {
+        return match;
+      }
+      return splitTable(match, maxTableSize).join("\n\n");
+    },
+  );
+}
+
+/**
  * Chunk text with intelligent splitting
- * Preserves code blocks and handles markdown-specific structures
+ * Handles code blocks and tables specially to prevent oversized chunks
  */
 function chunkText(
   text: string,
   chunkSize: number,
-  chunkOverlap: number
+  chunkOverlap: number,
 ): string[] {
   const chunks: string[] = [];
 
   // Sanitize first to remove null bytes
   const sanitized = sanitizeText(text);
 
-  // Preserve code blocks - extract them first
+  // Pre-process large code blocks and tables BEFORE placeholder extraction
+  // Use 80% of chunk size as max to leave room for surrounding context
+  const maxElementSize = Math.floor(chunkSize * 0.8);
+  let processed = preprocessLargeCodeBlocks(sanitized, maxElementSize);
+  processed = preprocessLargeTables(processed, maxElementSize);
+
+  // Now extract code blocks for preservation during text chunking
   const codeBlocks: { placeholder: string; content: string }[] = [];
-  const processedText = sanitized.replace(
+  const withPlaceholders = processed.replace(
     /```[\s\S]*?```|`[^`]+`/g,
     (match) => {
-      const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
-      codeBlocks.push({ placeholder, content: match });
-      return placeholder;
-    }
+      // Only use placeholder if the code block is small enough
+      // Large ones were already split above
+      if (match.length <= maxElementSize) {
+        const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
+        codeBlocks.push({ placeholder, content: match });
+        return placeholder;
+      }
+      // Keep large code blocks inline (they've been split)
+      return match;
+    },
   );
 
   // Clean up excessive whitespace while preserving paragraph breaks
-  const cleaned = processedText
+  const cleaned = withPlaceholders
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -363,7 +496,7 @@ export const MarkdownExtractorLive = Layer.effect(
 
           if (!existsSync(resolvedPath)) {
             return yield* Effect.fail(
-              new MarkdownNotFoundError({ path: resolvedPath })
+              new MarkdownNotFoundError({ path: resolvedPath }),
             );
           }
 
@@ -395,7 +528,7 @@ export const MarkdownExtractorLive = Layer.effect(
 
           if (!existsSync(resolvedPath)) {
             return yield* Effect.fail(
-              new MarkdownNotFoundError({ path: resolvedPath })
+              new MarkdownNotFoundError({ path: resolvedPath }),
             );
           }
 
@@ -422,7 +555,7 @@ export const MarkdownExtractorLive = Layer.effect(
             const sectionChunks = chunkText(
               sectionContent,
               config.chunkSize,
-              config.chunkOverlap
+              config.chunkOverlap,
             );
             sectionChunks.forEach((content, chunkIndex) => {
               allChunks.push({
@@ -446,7 +579,7 @@ export const MarkdownExtractorLive = Layer.effect(
 
           if (!existsSync(resolvedPath)) {
             return yield* Effect.fail(
-              new MarkdownNotFoundError({ path: resolvedPath })
+              new MarkdownNotFoundError({ path: resolvedPath }),
             );
           }
 
@@ -465,5 +598,5 @@ export const MarkdownExtractorLive = Layer.effect(
           return result;
         }),
     };
-  })
+  }),
 );

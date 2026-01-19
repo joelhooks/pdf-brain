@@ -177,11 +177,11 @@ export class Config extends Schema.Class<Config>("Config")({
     },
     enrichment: {
       provider: "ollama" as const,
-      model: "llama3.2",
+      model: "llama3.2:3b",
     },
     judge: {
       provider: "ollama" as const,
-      model: "llama3.2",
+      model: "llama3.2:3b",
     },
     ollama: {
       host: "http://localhost:11434",

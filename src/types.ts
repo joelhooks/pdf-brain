@@ -131,9 +131,13 @@ export class LibraryConfig extends Schema.Class<LibraryConfig>("LibraryConfig")(
   });
 
   static fromEnv(): LibraryConfig {
-    const libraryPath =
-      process.env.PDF_LIBRARY_PATH ||
-      `${process.env.HOME}/Documents/.pdf-library`;
+    // Respect PDF_LIBRARY_PATH but validate it exists to avoid connection errors
+    const envPath = process.env.PDF_LIBRARY_PATH;
+    const defaultPath = `${process.env.HOME}/Documents/.pdf-library`;
+
+    // Only use env var if the path actually exists (prevent silent failures)
+    const libraryPath = envPath && existsSync(envPath) ? envPath : defaultPath;
+
     return new LibraryConfig({
       libraryPath,
       dbPath: `${libraryPath}/library.db`,
@@ -199,9 +203,11 @@ export class Config extends Schema.Class<Config>("Config")({
  * Creates config.json with defaults if it doesn't exist.
  */
 export function loadConfig(): Config {
-  const libraryPath =
-    process.env.PDF_LIBRARY_PATH ||
-    `${process.env.HOME}/Documents/.pdf-library`;
+  const envPath = process.env.PDF_LIBRARY_PATH;
+  const defaultPath = `${process.env.HOME}/Documents/.pdf-library`;
+
+  // Only use env var if the path actually exists (prevent silent failures)
+  const libraryPath = envPath && existsSync(envPath) ? envPath : defaultPath;
   const configPath = `${libraryPath}/config.json`;
 
   // Create config file with defaults if missing
@@ -227,9 +233,11 @@ export function loadConfig(): Config {
  * API keys are never stored - they come from env vars (AI_GATEWAY_API_KEY).
  */
 export function saveConfig(config: Config): void {
-  const libraryPath =
-    process.env.PDF_LIBRARY_PATH ||
-    `${process.env.HOME}/Documents/.pdf-library`;
+  const envPath = process.env.PDF_LIBRARY_PATH;
+  const defaultPath = `${process.env.HOME}/Documents/.pdf-library`;
+
+  // Only use env var if the path actually exists (prevent silent failures)
+  const libraryPath = envPath && existsSync(envPath) ? envPath : defaultPath;
   const configPath = `${libraryPath}/config.json`;
 
   // Ensure directory exists

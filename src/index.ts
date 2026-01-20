@@ -594,6 +594,8 @@ export const PDFLibraryLive = (() => {
   const dbLayer = LibSQLDatabase.make({
     url: `file:${libraryConfig.dbPath}`,
     embeddingDimension: embeddingDim,
+    // Keep database alive in production - don't delete on layer disposal
+    keepAlive: true,
   });
 
   return PDFLibrary.Default.pipe(Layer.provide(dbLayer));

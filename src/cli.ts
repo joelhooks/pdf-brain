@@ -3,7 +3,7 @@
  * PDF Brain CLI
  */
 
-import { Effect, Console, Layer } from "effect";
+import { Effect, Console, Layer, Context } from "effect";
 import {
   mkdirSync,
   existsSync,
@@ -541,6 +541,331 @@ export function parseArgs(args: string[]) {
   return result;
 }
 
+/**
+ * Run MCP server for AI assistant integration
+ */
+function runMCPServer(): void {
+  // Initialize services
+  const config = LibraryConfig.fromEnv();
+  const TaxonomyServiceLive = TaxonomyServiceImpl.make({
+    url: `file:${config.dbPath}`,
+  });
+
+  const AppLayer = Layer.merge(
+    Layer.merge(Layer.merge(PDFLibraryLive, AutoTaggerLive), PDFExtractorLive),
+    Layer.merge(TaxonomyServiceLive, OllamaLive)
+  );
+
+  const services = Effect.runSync(Layer.build(AppLayer).pipe(Effect.scoped));
+
+  // MCP tool definitions
+  const tools = [
+    {
+      name: "pdf-brain_add",
+      description: "Add a PDF or Markdown file to the library",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path or URL" },
+          title: { type: "string", description: "Optional custom title" },
+          tags: { type: "array", items: { type: "string" }, description: "Optional tags" },
+          enrich: { type: "boolean", description: "Enable LLM enrichment", default: false },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "pdf-brain_search",
+      description: "Search documents and concepts",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+          limit: { type: "number", description: "Max results", default: 10 },
+          conceptsOnly: { type: "boolean", description: "Search only concepts", default: false },
+          docsOnly: { type: "boolean", description: "Search only documents", default: false },
+        },
+        required: ["query"],
+      },
+    },
+    {
+      name: "pdf-brain_list",
+      description: "List documents in the library",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tag: { type: "string", description: "Filter by tag" },
+        },
+      },
+    },
+    {
+      name: "pdf-brain_read",
+      description: "Get document details",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Document ID or title" },
+        },
+        required: ["id"],
+      },
+    },
+    {
+      name: "pdf-brain_remove",
+      description: "Remove a document from the library",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Document ID or title" },
+        },
+        required: ["id"],
+      },
+    },
+    {
+      name: "pdf-brain_tag",
+      description: "Set tags on a document",
+      inputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Document ID or title" },
+          tags: { type: "array", items: { type: "string" }, description: "Tags to set" },
+        },
+        required: ["id", "tags"],
+      },
+    },
+    {
+      name: "pdf-brain_stats",
+      description: "Get library statistics",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
+      name: "pdf-brain_taxonomy_list",
+      description: "List all concepts",
+      inputSchema: {
+        type: "object",
+        properties: {
+          format: { type: "string", enum: ["json", "table"], description: "Output format", default: "table" },
+        },
+      },
+    },
+    {
+      name: "pdf-brain_taxonomy_search",
+      description: "Search concepts by label",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+        },
+        required: ["query"],
+      },
+    },
+    {
+      name: "pdf-brain_check",
+      description: "Check if Ollama is ready",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+  ];
+
+  // Tool handlers
+  const toolHandlers: Record<string, (args: any) => Promise<any>> = {
+    "pdf-brain_add": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        const doc = await Effect.runPromise(
+          library.add(
+            args.path,
+            new AddOptions({
+              title: args.title,
+              tags: args.tags,
+            })
+          )
+        );
+        return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_search": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        const ollama = Context.unsafeGet(services, Ollama);
+        const taxonomy = Context.unsafeGet(services, TaxonomyService);
+
+        if (args.conceptsOnly) {
+          const queryEmbedding = await Effect.runPromise(ollama.embed(args.query));
+          const concepts = await Effect.runPromise(taxonomy.findSimilarConcepts(queryEmbedding, 0.3, args.limit || 10));
+          return { success: true, type: "concepts", results: concepts };
+        } else {
+          const results = await Effect.runPromise(library.search(args.query, new SearchOptions({ limit: args.limit || 10 })));
+          return { success: true, type: "documents", results };
+        }
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_list": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        const docs = await Effect.runPromise(library.list(args.tag));
+        return { success: true, documents: docs.map(d => ({ id: d.id, title: d.title, tags: d.tags })) };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_read": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        const doc = await Effect.runPromise(library.get(args.id));
+        if (!doc) throw new Error("Document not found");
+        return { success: true, document: { id: doc.id, title: doc.title, path: doc.path, tags: doc.tags, pageCount: doc.pageCount, sizeBytes: doc.sizeBytes, addedAt: doc.addedAt } };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_remove": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        const doc = await Effect.runPromise(library.remove(args.id));
+        return { success: true, removed: { id: doc.id, title: doc.title } };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_tag": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        const doc = await Effect.runPromise(library.tag(args.id, args.tags));
+        return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_stats": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        const stats = await Effect.runPromise(library.stats());
+        return { success: true, stats };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_taxonomy_list": async (args) => {
+      try {
+        const taxonomy = Context.unsafeGet(services, TaxonomyService);
+        const concepts = await Effect.runPromise(taxonomy.listConcepts());
+        return { success: true, concepts: concepts.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_taxonomy_search": async (args) => {
+      try {
+        const taxonomy = Context.unsafeGet(services, TaxonomyService);
+        const concepts = await Effect.runPromise(taxonomy.listConcepts());
+        const queryLower = args.query.toLowerCase();
+        const results = concepts.filter(c =>
+          c.prefLabel.toLowerCase().includes(queryLower) ||
+          c.altLabels.some(alt => alt.toLowerCase().includes(queryLower)) ||
+          (c.definition && c.definition.toLowerCase().includes(queryLower))
+        );
+        return { success: true, concepts: results.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+    "pdf-brain_check": async (args) => {
+      try {
+        const library = Context.unsafeGet(services, PDFLibrary);
+        await Effect.runPromise(library.checkReady());
+        return { success: true, message: "Ollama is ready" };
+      } catch (e) {
+        return { success: false, error: String(e) };
+      }
+    },
+  };
+
+  // Handle STDIO messages
+  const handleMessage = async (message: any) => {
+    if (message.method === "initialize") {
+      return {
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: {
+            tools: {},
+          },
+          serverInfo: {
+            name: "pdf-brain",
+            version: VERSION,
+          },
+        },
+      };
+    } else if (message.method === "tools/list") {
+      return {
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          tools,
+        },
+      };
+    } else if (message.method === "tools/call") {
+      const { name, arguments: args } = message.params;
+      const handler = toolHandlers[name];
+      if (handler) {
+        try {
+          const result = await handler(args);
+          return {
+            jsonrpc: "2.0",
+            id: message.id,
+            result: {
+              content: [{ type: "text", text: JSON.stringify(result) }],
+            },
+          };
+        } catch (e) {
+          return {
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32603,
+              message: String(e),
+            },
+          };
+        }
+      } else {
+        return {
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: -32601,
+            message: `Method not found: ${name}`,
+          },
+        };
+      }
+    }
+    return null;
+  };
+
+  // Set up STDIO communication
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", async (chunk) => {
+    try {
+      const message = JSON.parse(chunk.toString().trim());
+      const response = await handleMessage(message);
+      if (response) {
+        process.stdout.write(JSON.stringify(response) + "\n");
+      }
+    } catch (e) {
+      // Ignore invalid JSON
+    }
+  });
+}
+
 const program = Effect.gen(function* () {
   const args = process.argv.slice(2);
 
@@ -902,9 +1227,10 @@ const program = Effect.gen(function* () {
     case "config": {
       const subcommand = args[1];
       const config = loadConfig();
+      const envPath = process.env.PDF_LIBRARY_PATH;
+      const defaultPath = `${process.env.HOME}/Documents/.pdf-library`;
       const libraryPath =
-        process.env.PDF_LIBRARY_PATH ||
-        `${process.env.HOME}/Documents/.pdf-library`;
+        envPath && existsSync(envPath) ? envPath : defaultPath;
       const configPath = `${libraryPath}/config.json`;
 
       if (!subcommand || subcommand === "show") {
@@ -1380,6 +1706,11 @@ const program = Effect.gen(function* () {
 
       yield* Console.log(`\n✓ Library imported successfully`);
       yield* Console.log(`\nRun 'pdf-brain stats' to verify`);
+      break;
+    }
+
+    case "mcp": {
+      runMCPServer();
       break;
     }
 

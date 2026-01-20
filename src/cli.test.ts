@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawn, ChildProcess } from "child_process";
 import {
   filenameFromURL,
   looksLikeMarkdown,
@@ -9,6 +10,74 @@ import {
   shouldCheckpoint,
   parseArgs,
 } from "./cli.js";
+
+
+async function waitForResponse(
+  responses: any[],
+  predicate: (r: any) => boolean,
+  timeoutMs: number = 5000
+): Promise<any> {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    const found = responses.find(predicate);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timeout waiting for response after ${timeoutMs}ms`);
+}
+
+async function waitForResponseCount(
+  responses: any[],
+  count: number,
+  timeoutMs: number = 5000
+): Promise<void> {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    if (responses.length >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timeout waiting for ${count} responses after ${timeoutMs}ms`);
+}
+
+function createMCPProcess(): ChildProcess {
+  return spawn("bun", ["run", "src/cli.ts", "mcp"], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+function ensureStdin(process: ChildProcess): NodeJS.WritableStream {
+  if (!process.stdin) {
+    throw new Error("Process stdin is null - stdio must include 'pipe' for stdin");
+  }
+  return process.stdin;
+}
+
+function collectResponses(process: ChildProcess, filterLogs: boolean = false): any[] {
+  const responses: any[] = [];
+  
+  if (!process.stdout) {
+    throw new Error("Process stdout is null - stdio must include 'pipe' for stdout");
+  }
+  
+  process.stdout.on("data", (data) => {
+    const lines = data.toString().split("\n").filter((l: string) => l.trim());
+    for (const line of lines) {
+      if (filterLogs && !line.trim().startsWith("{")) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed.jsonrpc === "2.0") {
+          responses.push(parsed);
+        }
+      } catch (e) {
+        // Ignore invalid JSON (likely log messages)
+      }
+    }
+  });
+  
+  return responses;
+}
 
 describe("filenameFromURL", () => {
   test("preserves .pdf extension", () => {
@@ -357,4 +426,381 @@ describe("CLI integration: cluster command with --soft flag", () => {
   // NOTE: Full cluster command integration test deferred
   // The cluster command implementation is part of a separate cell/PR
   // This cell focuses on CLI argument parsing and wiring flags to services
+});
+
+describe("MCP server protocol", () => {
+  test("handles fragmented STDIN messages correctly", async () => {
+    const mcpProcess = createMCPProcess();
+    const responses = collectResponses(mcpProcess);
+
+    const message = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+    const json = JSON.stringify(message) + "\n";
+
+    const chunk1 = json.substring(0, Math.floor(json.length / 3));
+    const chunk2 = json.substring(
+      Math.floor(json.length / 3),
+      Math.floor(json.length * 2 / 3)
+    );
+    const chunk3 = json.substring(Math.floor(json.length * 2 / 3));
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(chunk1);
+    stdin.write(chunk2);
+    stdin.write(chunk3);
+    stdin.end();
+
+    const response = await waitForResponse(responses, (r) => r.id === 1);
+    mcpProcess.kill();
+
+    expect(response.id).toBe(1);
+    expect(response.result).toBeDefined();
+  });
+
+  test("returns JSON-RPC error for unknown method with ID", async () => {
+    const mcpProcess = createMCPProcess();
+    const responses = collectResponses(mcpProcess);
+
+    const message = {
+      jsonrpc: "2.0",
+      id: 999,
+      method: "unknown_method_xyz",
+    };
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(JSON.stringify(message) + "\n");
+    stdin.end();
+
+    const response = await waitForResponse(responses, (r) => r.id === 999);
+    mcpProcess.kill();
+
+    expect(response.id).toBe(999);
+    expect(response.error).toBeDefined();
+    expect(response.error.code).toBe(-32601);
+    expect(response.error.message).toContain("Method not found");
+  });
+
+  test("does not respond to unknown notifications without ID", async () => {
+    const mcpProcess = createMCPProcess();
+    const responses = collectResponses(mcpProcess);
+
+    const message = {
+      jsonrpc: "2.0",
+      method: "unknown_notification",
+    };
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(JSON.stringify(message) + "\n");
+    stdin.end();
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    mcpProcess.kill();
+
+    expect(responses.length).toBe(0);
+  });
+
+  test("respects docsOnly parameter in search", async () => {
+    const mcpProcess = createMCPProcess();
+    const responses = collectResponses(mcpProcess, true);
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" }
+      }
+    }) + "\n");
+
+    await waitForResponse(responses, (r) => r.id === 1);
+
+    const message = {
+      jsonrpc: "2.0",
+      id: 100,
+      method: "tools/call",
+      params: {
+        name: "pdf-brain_search",
+        arguments: {
+          query: "test",
+          docsOnly: true,
+        },
+      },
+    };
+
+    stdin.write(JSON.stringify(message) + "\n");
+    stdin.end();
+
+    const response = await waitForResponse(responses, (r) => r.id === 100, 10000);
+    mcpProcess.kill();
+
+    expect(response.id).toBe(100);
+    expect(response.result).toBeDefined();
+    
+    const content = JSON.parse(response.result.content[0].text);
+    expect(content.success).toBe(true);
+    expect(content.type).toBe("documents");
+    expect(content.results).toBeDefined();
+    expect(Array.isArray(content.results)).toBe(true);
+  });
+
+  test("respects conceptsOnly parameter in search", async () => {
+    const mcpProcess = spawn("bun", ["run", "src/cli.ts", "mcp"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const responses: any[] = [];
+
+    mcpProcess.stdout.on("data", (data) => {
+      const lines = data.toString().split("\n").filter((l: string) => l.trim());
+      for (const line of lines) {
+        if (!line.trim().startsWith("{")) {
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.jsonrpc === "2.0") {
+            responses.push(parsed);
+          }
+        } catch (e) {
+          // Ignore invalid JSON (likely log messages)
+        }
+      }
+    });
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" }
+      }
+    }) + "\n");
+
+    await waitForResponse(responses, (r) => r.id === 1);
+
+    const message = {
+      jsonrpc: "2.0",
+      id: 101,
+      method: "tools/call",
+      params: {
+        name: "pdf-brain_search",
+        arguments: {
+          query: "test",
+          conceptsOnly: true,
+        },
+      },
+    };
+
+    stdin.write(JSON.stringify(message) + "\n");
+    stdin.end();
+
+    const response = await waitForResponse(responses, (r) => r.id === 101, 10000);
+    mcpProcess.kill();
+
+    expect(response.id).toBe(101);
+    expect(response.result).toBeDefined();
+    
+    const content = JSON.parse(response.result.content[0].text);
+    expect(content.success).toBe(true);
+    expect(content.type).toBe("concepts");
+    expect(content.results).toBeDefined();
+    expect(Array.isArray(content.results)).toBe(true);
+  });
+
+  test("returns empty results when both docsOnly and conceptsOnly are true", async () => {
+    const mcpProcess = createMCPProcess();
+    const responses = collectResponses(mcpProcess);
+
+    const message = {
+      jsonrpc: "2.0",
+      id: 102,
+      method: "tools/call",
+      params: {
+        name: "pdf-brain_search",
+        arguments: {
+          query: "test",
+          conceptsOnly: true,
+          docsOnly: true,
+        },
+      },
+    };
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(JSON.stringify(message) + "\n");
+    stdin.end();
+
+    const response = await waitForResponse(responses, (r) => r.id === 102, 10000);
+    mcpProcess.kill();
+
+    expect(response.id).toBe(102);
+    expect(response.result).toBeDefined();
+    
+    const content = JSON.parse(response.result.content[0].text);
+    expect(content.success).toBe(true);
+    expect(content.type).toBe("empty");
+    expect(content.documents).toBeDefined();
+    expect(content.concepts).toBeDefined();
+    expect(Array.isArray(content.documents)).toBe(true);
+    expect(Array.isArray(content.concepts)).toBe(true);
+    expect(content.documents.length).toBe(0);
+    expect(content.concepts.length).toBe(0);
+  });
+
+  test("writes search responses promptly", async () => {
+    const mcpProcess = createMCPProcess();
+    const responses = collectResponses(mcpProcess, true);
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" }
+      }
+    }) + "\n");
+
+    await waitForResponse(responses, (r) => r.id === 1);
+
+    const message = {
+      jsonrpc: "2.0",
+      id: 200,
+      method: "tools/call",
+      params: {
+        name: "pdf-brain_search",
+        arguments: {
+          query: "test",
+          docsOnly: true,
+        },
+      },
+    };
+
+    const searchStartTime = Date.now();
+    stdin.write(JSON.stringify(message) + "\n");
+    stdin.end();
+
+    const response = await waitForResponse(responses, (r) => r.id === 200, 10000);
+    const responseTime = Date.now() - searchStartTime;
+    mcpProcess.kill();
+
+    expect(response.id).toBe(200);
+    expect(responseTime).toBeLessThan(10000);
+  });
+
+  test("maintains Effect scope across multiple tool calls", async () => {
+    const mcpProcess = createMCPProcess();
+    const responses = collectResponses(mcpProcess);
+
+    const messages = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "pdf-brain_stats", arguments: {} },
+      },
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "pdf-brain_list", arguments: {} },
+      },
+    ];
+
+    const stdin = ensureStdin(mcpProcess);
+    for (const msg of messages) {
+      stdin.write(JSON.stringify(msg) + "\n");
+    }
+
+    stdin.end();
+
+    await waitForResponseCount(responses, 4, 10000);
+    mcpProcess.kill();
+
+    expect(responses.length).toBeGreaterThanOrEqual(4);
+    
+    for (const resp of responses) {
+      expect(resp.jsonrpc).toBe("2.0");
+      if (resp.error) {
+        expect(resp.error.code).toBeDefined();
+        expect(resp.error.message).toBeDefined();
+        expect(resp.error.message).not.toContain("disposed");
+      }
+    }
+  });
+
+  test("converts Effect failures to JSON-RPC errors", async () => {
+    const mcpProcess = spawn("bun", ["run", "src/cli.ts", "mcp"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const responses: any[] = [];
+
+    mcpProcess.stdout.on("data", (data) => {
+      const lines = data.toString().split("\n").filter((l: string) => l.trim());
+      for (const line of lines) {
+        if (!line.trim().startsWith("{")) {
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.jsonrpc === "2.0") {
+            responses.push(parsed);
+          }
+        } catch (e) {
+          // Ignore invalid JSON (likely log messages)
+        }
+      }
+    });
+
+    const stdin = ensureStdin(mcpProcess);
+    stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0" }
+      }
+    }) + "\n");
+
+    await waitForResponse(responses, (r) => r.id === 1);
+
+    const message = {
+      jsonrpc: "2.0",
+      id: 999,
+      method: "tools/call",
+      params: {
+        name: "pdf-brain_read",
+        arguments: { id: "non-existent-doc-id-12345" },
+      },
+    };
+
+    stdin.write(JSON.stringify(message) + "\n");
+    stdin.end();
+
+    const response = await waitForResponse(responses, (r) => r.id === 999, 10000);
+    mcpProcess.kill();
+
+    expect(response).toBeDefined();
+    
+    if (response.error) {
+      expect(response.error.code).toBe(-32603);
+      expect(response.error.message).toBeDefined();
+      expect(typeof response.error.message).toBe("string");
+    } else if (response.result) {
+      const content = JSON.parse(response.result.content[0].text);
+      expect(content.success).toBe(false);
+      expect(content.error).toBeDefined();
+    }
+  });
 });

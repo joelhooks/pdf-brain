@@ -3,8 +3,11 @@
  */
 
 import { Effect, Layer } from "effect";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { createClient } from "@libsql/client";
+import { existsSync, mkdirSync, rmSync } from "fs";
+import { access } from "fs/promises";
+import { join } from "path";
 import { Database } from "./Database.js";
 import { LibSQLDatabase } from "./LibSQLDatabase.js";
 import { Document, SearchOptions, DatabaseError } from "../types.js";
@@ -1167,6 +1170,155 @@ describe("LibSQLDatabase", () => {
       client.close();
 
       expect(result.rows.length).toBe(1);
+    });
+  });
+
+  describe("database file cleanup on layer disposal", () => {
+    const testDbDir = "/tmp/pdf-brain-test-db";
+    const testDbPath = join(testDbDir, "test.db");
+
+    beforeEach(() => {
+      if (existsSync(testDbDir)) {
+        rmSync(testDbDir, { recursive: true, force: true });
+      }
+      mkdirSync(testDbDir, { recursive: true });
+    });
+
+    afterEach(() => {
+      if (existsSync(testDbDir)) {
+        rmSync(testDbDir, { recursive: true, force: true });
+      }
+    });
+
+    test("deletes database files when keepAlive is false", async () => {
+      const layer = LibSQLDatabase.make({
+        url: `file:${testDbPath}`,
+        keepAlive: false,
+      });
+
+      const initProgram = Effect.gen(function* () {
+        const db = yield* Database;
+        yield* db.addDocument({
+          id: "test-1",
+          title: "Test",
+          path: "/test.pdf",
+          addedAt: new Date(),
+          pageCount: 1,
+          sizeBytes: 100,
+          tags: [],
+          metadata: {},
+          fileType: "pdf",
+        });
+        
+        if (!existsSync(testDbPath)) {
+          return yield* Effect.fail(new Error("Database file not created"));
+        }
+        
+        return "initialized";
+      });
+
+      await expect(
+        Effect.runPromise(
+          initProgram.pipe(Effect.provide(layer), Effect.scoped)
+        )
+      ).resolves.toBe("initialized");
+
+      let fileDeleted = false;
+      const maxRetries = 20;
+      const retryDelay = 50;
+      
+      for (let i = 0; i < maxRetries; i++) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        try {
+          await access(testDbPath);
+        } catch (error: any) {
+          if (error?.code === "ENOENT" || error?.name === "NotFoundError") {
+            fileDeleted = true;
+            break;
+          }
+          throw error;
+        }
+      }
+
+      expect(fileDeleted).toBe(true);
+    });
+
+    test("preserves database files when keepAlive is true", async () => {
+      const layer = LibSQLDatabase.make({
+        url: `file:${testDbPath}`,
+        keepAlive: true,
+      });
+
+      const initProgram = Effect.gen(function* () {
+        const db = yield* Database;
+        yield* db.addDocument({
+          id: "test-1",
+          title: "Test",
+          path: "/test.pdf",
+          addedAt: new Date(),
+          pageCount: 1,
+          sizeBytes: 100,
+          tags: [],
+          metadata: {},
+          fileType: "pdf",
+        });
+        return "initialized";
+      });
+
+      await Effect.runPromise(
+        initProgram.pipe(Effect.provide(layer), Effect.scoped)
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(existsSync(testDbPath)).toBe(true);
+    });
+
+    test("handles missing WAL/SHM files gracefully during cleanup", async () => {
+      const layer = LibSQLDatabase.make({
+        url: `file:${testDbPath}`,
+        keepAlive: false,
+      });
+
+      const initProgram = Effect.gen(function* () {
+        const db = yield* Database;
+        yield* db.addDocument({
+          id: "test-enoent",
+          title: "Test ENOENT",
+          path: "/test.pdf",
+          addedAt: new Date(),
+          pageCount: 1,
+          sizeBytes: 100,
+          tags: [],
+          metadata: {},
+          fileType: "pdf",
+        });
+        return "initialized";
+      });
+
+      await Effect.runPromise(
+        initProgram.pipe(Effect.provide(layer))
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      if (existsSync(`${testDbPath}-shm`)) {
+        rmSync(`${testDbPath}-shm`);
+      }
+      if (existsSync(`${testDbPath}-wal`)) {
+        rmSync(`${testDbPath}-wal`);
+      }
+
+      const finalizerProgram = Effect.gen(function* () {
+        yield* Database;
+        return "finalized";
+      });
+
+      await expect(
+        Effect.runPromise(
+          finalizerProgram.pipe(Effect.provide(layer), Effect.scoped)
+        )
+      ).resolves.toBe("finalized");
     });
   });
 });

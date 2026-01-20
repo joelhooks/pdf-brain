@@ -746,7 +746,9 @@ function runMCPServer(): void {
         Effect.gen(function* () {
           const library = yield* PDFLibrary;
           const doc = yield* library.get(args.id);
-          if (!doc) throw new Error("Document not found");
+          if (!doc) {
+            return yield* Effect.fail(new Error("Document not found"));
+          }
           return { success: true, document: { id: doc.id, title: doc.title, path: doc.path, tags: doc.tags, pageCount: doc.pageCount, sizeBytes: doc.sizeBytes, addedAt: doc.addedAt } };
         }),
       "pdf-brain_remove": (args) =>
@@ -885,47 +887,78 @@ function runMCPServer(): void {
     let buffer = "";
     process.stdin.setEncoding("utf8");
     
+    // Message queue and resolver for bridging callback world to Effect world
+    const messageQueue: any[] = [];
+    let messageResolver: ((message: any) => void) | null = null;
+    
+    // Bridge from callback world to Effect world using Effect.async
+    // This allows processing messages within the Effect context (reuses provided AppLayer)
+    const waitForMessage = (): Effect.Effect<any, never, never> =>
+      Effect.async((resume) => {
+        // Check queue first - if messages are already queued, process them immediately
+        if (messageQueue.length > 0) {
+          const msg = messageQueue.shift()!;
+          resume(Effect.succeed(msg));
+        } else {
+          // Queue is empty - set up resolver to be called when next message arrives
+          messageResolver = (msg) => {
+            messageResolver = null; // Clear resolver after use
+            resume(Effect.succeed(msg));
+          };
+        }
+      });
+    
+    // Process a message within the Effect context (services available via outer scope)
+    const processMessage = (message: any) =>
+      Effect.gen(function* () {
+        const response = yield* handleMessage(message);
+        if (response) {
+          yield* Effect.sync(() => {
+            const output = JSON.stringify(response) + "\n";
+            process.stdout.write(output);
+          });
+        }
+      }).pipe(
+        Effect.catchAll((error) => {
+          // Send error response for requests with ID
+          if (message.id !== undefined) {
+            return Effect.sync(() => {
+              const errorResponse = {
+                jsonrpc: "2.0",
+                id: message.id,
+                error: {
+                  code: -32603,
+                  message: error instanceof Error ? error.message : String(error),
+                },
+              };
+              const output = JSON.stringify(errorResponse) + "\n";
+              process.stdout.write(output);
+            });
+          }
+          return Effect.void;
+        })
+      );
+    
     process.stdin.on("data", (chunk) => {
       buffer += chunk.toString();
       const lines = buffer.split("\n");
       // Keep the last (potentially incomplete) line in buffer
       buffer = lines.pop() || "";
       
-      // Process each complete line
+      // Process each complete line - queue messages for processing in Effect context
       for (const line of lines) {
         if (line.trim()) {
           try {
             const message = JSON.parse(line.trim());
-            
-            // Run handler with Effect environment and send response
-            Effect.runPromise(
-              handleMessage(message).pipe(
-                Effect.provide(AppLayer),
-                Effect.flatMap((response) => {
-                  if (response) {
-                    return Effect.sync(() => {
-                      const output = JSON.stringify(response) + "\n";
-                      process.stdout.write(output);
-                    });
-                  }
-                  return Effect.void;
-                })
-              )
-            ).catch((error) => {
-              // Send error response for requests with ID
-              if (message.id !== undefined) {
-                const errorResponse = {
-                  jsonrpc: "2.0",
-                  id: message.id,
-                  error: {
-                    code: -32603,
-                    message: error instanceof Error ? error.message : String(error),
-                  },
-                };
-                const output = JSON.stringify(errorResponse) + "\n";
-                process.stdout.write(output);
-              }
-            });
+            // If there's a resolver waiting, call it immediately
+            // Otherwise, queue the message for the next waitForMessage call
+            if (messageResolver) {
+              const resolver = messageResolver;
+              messageResolver = null; // Clear before calling to prevent double-processing
+              resolver(message);
+            } else {
+              messageQueue.push(message);
+            }
           } catch (e) {
             // Ignore invalid JSON per-line
           }
@@ -933,8 +966,21 @@ function runMCPServer(): void {
       }
     });
 
-    // Keep process alive - wait indefinitely
-    return yield* Effect.never;
+    // Process messages in a loop within the Effect context (reuses outer scope's AppLayer)
+    // This ensures services are reused across messages without re-providing the layer
+    yield* Effect.forever(
+      Effect.gen(function* () {
+        const message = yield* waitForMessage();
+        yield* processMessage(message);
+      })
+    ).pipe(
+      Effect.catchAll((error) => {
+        // Log errors but don't crash - keep processing messages
+        return Effect.sync(() => {
+          console.error("[MCP] Error in message processing loop:", error);
+        });
+      })
+    );
   });
 
   // Run MCP server with layer scope kept alive

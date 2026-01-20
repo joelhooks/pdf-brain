@@ -76,9 +76,37 @@ export class LibSQLDatabase {
                 const shmFile = Bun.file(`${dbPath}-shm`);
                 const walFile = Bun.file(`${dbPath}-wal`);
                 
-                yield* Effect.sync(() => dbFile.delete());
-                yield* Effect.sync(() => shmFile.delete());
-                yield* Effect.sync(() => walFile.delete());
+                // Use Effect.tryPromise to properly await async deletions
+                yield* Effect.tryPromise({
+                  try: () => dbFile.delete(),
+                  catch: (e: any) => {
+                    // Ignore file-not-found errors (file already deleted or doesn't exist)
+                    if (e?.code === 'ENOENT' || e?.name === 'NotFoundError') {
+                      return undefined;
+                    }
+                    return e;
+                  },
+                }).pipe(Effect.ignore);
+                
+                yield* Effect.tryPromise({
+                  try: () => shmFile.delete(),
+                  catch: (e: any) => {
+                    if (e?.code === 'ENOENT' || e?.name === 'NotFoundError') {
+                      return undefined;
+                    }
+                    return e;
+                  },
+                }).pipe(Effect.ignore);
+                
+                yield* Effect.tryPromise({
+                  try: () => walFile.delete(),
+                  catch: (e: any) => {
+                    if (e?.code === 'ENOENT' || e?.name === 'NotFoundError') {
+                      return undefined;
+                    }
+                    return e;
+                  },
+                }).pipe(Effect.ignore);
               }
             }
           }),

@@ -543,9 +543,9 @@ export function parseArgs(args: string[]) {
 
 /**
  * Run MCP server for AI assistant integration
+ * Refactored to keep Effect layer scope alive for process lifetime
  */
 function runMCPServer(): void {
-  // Initialize services
   const config = LibraryConfig.fromEnv();
   const TaxonomyServiceLive = TaxonomyServiceImpl.make({
     url: `file:${config.dbPath}`,
@@ -555,8 +555,6 @@ function runMCPServer(): void {
     Layer.merge(Layer.merge(PDFLibraryLive, AutoTaggerLive), PDFExtractorLive),
     Layer.merge(TaxonomyServiceLive, OllamaLive)
   );
-
-  const services = Effect.runSync(Layer.build(AppLayer).pipe(Effect.scoped));
 
   // MCP tool definitions
   const tools = [
@@ -671,128 +669,136 @@ function runMCPServer(): void {
     },
   ];
 
-  // Tool handlers
-  const toolHandlers: Record<string, (args: any) => Promise<any>> = {
-    "pdf-brain_add": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        const doc = await Effect.runPromise(
-          library.add(
+  // Tool handlers - refactored to use Effect environment
+  const createToolHandlers = () => {
+    const toolHandlers: Record<string, (args: any) => Effect.Effect<any, any, PDFLibrary | Ollama | TaxonomyService>> = {
+      "pdf-brain_add": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          const doc = yield* library.add(
             args.path,
             new AddOptions({
               title: args.title,
               tags: args.tags,
             })
-          )
-        );
-        return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_search": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        const ollama = Context.unsafeGet(services, Ollama);
-        const taxonomy = Context.unsafeGet(services, TaxonomyService);
+          );
+          return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
+        }),
+      "pdf-brain_search": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          const ollama = yield* Ollama;
+          const taxonomy = yield* TaxonomyService;
 
-        if (args.conceptsOnly) {
-          const queryEmbedding = await Effect.runPromise(ollama.embed(args.query));
-          const concepts = await Effect.runPromise(taxonomy.findSimilarConcepts(queryEmbedding, 0.3, args.limit || 10));
-          return { success: true, type: "concepts", results: concepts };
-        } else {
-          const results = await Effect.runPromise(library.search(args.query, new SearchOptions({ limit: args.limit || 10 })));
-          return { success: true, type: "documents", results };
-        }
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_list": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        const docs = await Effect.runPromise(library.list(args.tag));
-        return { success: true, documents: docs.map(d => ({ id: d.id, title: d.title, tags: d.tags })) };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_read": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        const doc = await Effect.runPromise(library.get(args.id));
-        if (!doc) throw new Error("Document not found");
-        return { success: true, document: { id: doc.id, title: doc.title, path: doc.path, tags: doc.tags, pageCount: doc.pageCount, sizeBytes: doc.sizeBytes, addedAt: doc.addedAt } };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_remove": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        const doc = await Effect.runPromise(library.remove(args.id));
-        return { success: true, removed: { id: doc.id, title: doc.title } };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_tag": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        const doc = await Effect.runPromise(library.tag(args.id, args.tags));
-        return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_stats": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        const stats = await Effect.runPromise(library.stats());
-        return { success: true, stats };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_taxonomy_list": async (args) => {
-      try {
-        const taxonomy = Context.unsafeGet(services, TaxonomyService);
-        const concepts = await Effect.runPromise(taxonomy.listConcepts());
-        return { success: true, concepts: concepts.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_taxonomy_search": async (args) => {
-      try {
-        const taxonomy = Context.unsafeGet(services, TaxonomyService);
-        const concepts = await Effect.runPromise(taxonomy.listConcepts());
-        const queryLower = args.query.toLowerCase();
-        const results = concepts.filter(c =>
-          c.prefLabel.toLowerCase().includes(queryLower) ||
-          c.altLabels.some(alt => alt.toLowerCase().includes(queryLower)) ||
-          (c.definition && c.definition.toLowerCase().includes(queryLower))
-        );
-        return { success: true, concepts: results.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
-    "pdf-brain_check": async (args) => {
-      try {
-        const library = Context.unsafeGet(services, PDFLibrary);
-        await Effect.runPromise(library.checkReady());
-        return { success: true, message: "Ollama is ready" };
-      } catch (e) {
-        return { success: false, error: String(e) };
-      }
-    },
+          const conceptsOnly = args.conceptsOnly === true;
+          const docsOnly = args.docsOnly === true;
+
+          // Determine what to search (matching CLI logic at lines 1086-1087)
+          // If both flags are true, both search flags are false (search neither)
+          const searchDocs = !conceptsOnly;
+          const searchConcepts = !docsOnly;
+
+          // Handle conflicting flags: if both are true, search neither (empty results)
+          if (!searchDocs && !searchConcepts) {
+            return { 
+              success: true, 
+              type: "empty", 
+              documents: [],
+              concepts: []
+            };
+          }
+
+          // Search concepts (if enabled)
+          const conceptResults = searchConcepts
+            ? yield* Effect.gen(function* () {
+                const queryEmbedding = yield* ollama.embed(args.query);
+                return yield* taxonomy.findSimilarConcepts(queryEmbedding, 0.3, args.limit || 10);
+              }).pipe(Effect.catchAll(() => Effect.succeed([] as Concept[])))
+            : [];
+
+          // Search documents (if enabled)
+          const docResults = searchDocs
+            ? yield* library.search(args.query, new SearchOptions({ limit: args.limit || 10 }))
+            : [];
+
+          // Return appropriate response format based on what was searched
+          if (searchConcepts && !searchDocs) {
+            return { success: true, type: "concepts", results: conceptResults };
+          } else if (searchDocs && !searchConcepts) {
+            return { success: true, type: "documents", results: docResults };
+          } else {
+            // Both searched (default case)
+            return { 
+              success: true, 
+              type: "unified", 
+              documents: docResults,
+              concepts: conceptResults
+            };
+          }
+        }),
+      "pdf-brain_list": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          const docs = yield* library.list(args.tag);
+          return { success: true, documents: docs.map(d => ({ id: d.id, title: d.title, tags: d.tags })) };
+        }),
+      "pdf-brain_read": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          const doc = yield* library.get(args.id);
+          if (!doc) throw new Error("Document not found");
+          return { success: true, document: { id: doc.id, title: doc.title, path: doc.path, tags: doc.tags, pageCount: doc.pageCount, sizeBytes: doc.sizeBytes, addedAt: doc.addedAt } };
+        }),
+      "pdf-brain_remove": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          const doc = yield* library.remove(args.id);
+          return { success: true, removed: { id: doc.id, title: doc.title } };
+        }),
+      "pdf-brain_tag": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          const doc = yield* library.tag(args.id, args.tags);
+          return { success: true, document: { id: doc.id, title: doc.title, tags: doc.tags } };
+        }),
+      "pdf-brain_stats": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          const stats = yield* library.stats();
+          return { success: true, stats };
+        }),
+      "pdf-brain_taxonomy_list": (args) =>
+        Effect.gen(function* () {
+          const taxonomy = yield* TaxonomyService;
+          const concepts = yield* taxonomy.listConcepts();
+          return { success: true, concepts: concepts.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
+        }),
+      "pdf-brain_taxonomy_search": (args) =>
+        Effect.gen(function* () {
+          const taxonomy = yield* TaxonomyService;
+          const concepts = yield* taxonomy.listConcepts();
+          const queryLower = args.query.toLowerCase();
+          const results = concepts.filter(c =>
+            c.prefLabel.toLowerCase().includes(queryLower) ||
+            c.altLabels.some(alt => alt.toLowerCase().includes(queryLower)) ||
+            (c.definition && c.definition.toLowerCase().includes(queryLower))
+          );
+          return { success: true, concepts: results.map(c => ({ id: c.id, prefLabel: c.prefLabel, definition: c.definition })) };
+        }),
+      "pdf-brain_check": (args) =>
+        Effect.gen(function* () {
+          const library = yield* PDFLibrary;
+          yield* library.checkReady();
+          return { success: true, message: "Ollama is ready" };
+        }),
+    };
+    return toolHandlers;
   };
 
-  // Handle STDIO messages
-  const handleMessage = async (message: any) => {
+  // Handle STDIO messages - refactored to use Effect environment
+  const handleMessage = (message: any): Effect.Effect<any, any, PDFLibrary | Ollama | TaxonomyService> => {
     if (message.method === "initialize") {
-      return {
+      return Effect.succeed({
         jsonrpc: "2.0",
         id: message.id,
         result: {
@@ -805,64 +811,140 @@ function runMCPServer(): void {
             version: VERSION,
           },
         },
-      };
+      });
     } else if (message.method === "tools/list") {
-      return {
+      return Effect.succeed({
         jsonrpc: "2.0",
         id: message.id,
         result: {
           tools,
         },
-      };
+      });
     } else if (message.method === "tools/call") {
       const { name, arguments: args } = message.params;
+      const toolHandlers = createToolHandlers();
       const handler = toolHandlers[name];
       if (handler) {
-        try {
-          const result = await handler(args);
+        return Effect.gen(function* () {
+          // Effect.either converts Effect failures to Either values
+          // This catches both Effect.fail() failures and JS exceptions thrown in Effect.gen
+          const result = yield* Effect.either(handler(args));
+          
+          if (result._tag === "Left") {
+            // Effect failure or exception - convert to JSON-RPC error
+            return {
+              jsonrpc: "2.0",
+              id: message.id,
+              error: {
+                code: -32603,
+                message: result.left instanceof Error 
+                  ? result.left.message 
+                  : String(result.left),
+              },
+            };
+          }
+          
+          // Success - return result
           return {
             jsonrpc: "2.0",
             id: message.id,
             result: {
-              content: [{ type: "text", text: JSON.stringify(result) }],
+              content: [{ type: "text", text: JSON.stringify(result.right) }],
             },
           };
-        } catch (e) {
-          return {
-            jsonrpc: "2.0",
-            id: message.id,
-            error: {
-              code: -32603,
-              message: String(e),
-            },
-          };
-        }
+        });
       } else {
-        return {
+        return Effect.succeed({
           jsonrpc: "2.0",
           id: message.id,
           error: {
             code: -32601,
             message: `Method not found: ${name}`,
           },
-        };
+        });
       }
     }
-    return null;
+    // Unknown method - return error for method calls with ID
+    if (message.id !== undefined) {
+      return Effect.succeed({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: {
+          code: -32601,
+          message: `Method not found: ${message.method}`,
+        },
+      });
+    }
+    // Notifications (no id) don't require a response
+    return Effect.succeed(null);
   };
 
-  // Set up STDIO communication
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", async (chunk) => {
-    try {
-      const message = JSON.parse(chunk.toString().trim());
-      const response = await handleMessage(message);
-      if (response) {
-        process.stdout.write(JSON.stringify(response) + "\n");
+  // MCP server Effect program - keeps scope alive for process lifetime
+  const mcpProgram = Effect.gen(function* () {
+    // Set up STDIO communication with buffering for fragmented messages
+    let buffer = "";
+    process.stdin.setEncoding("utf8");
+    
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      // Keep the last (potentially incomplete) line in buffer
+      buffer = lines.pop() || "";
+      
+      // Process each complete line
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const message = JSON.parse(line.trim());
+            
+            // Run handler with Effect environment and send response
+            Effect.runPromise(
+              handleMessage(message).pipe(
+                Effect.provide(AppLayer),
+                Effect.flatMap((response) => {
+                  if (response) {
+                    return Effect.sync(() => {
+                      const output = JSON.stringify(response) + "\n";
+                      process.stdout.write(output);
+                    });
+                  }
+                  return Effect.void;
+                })
+              )
+            ).catch((error) => {
+              // Send error response for requests with ID
+              if (message.id !== undefined) {
+                const errorResponse = {
+                  jsonrpc: "2.0",
+                  id: message.id,
+                  error: {
+                    code: -32603,
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                };
+                const output = JSON.stringify(errorResponse) + "\n";
+                process.stdout.write(output);
+              }
+            });
+          } catch (e) {
+            // Ignore invalid JSON per-line
+          }
+        }
       }
-    } catch (e) {
-      // Ignore invalid JSON
-    }
+    });
+
+    // Keep process alive - wait indefinitely
+    return yield* Effect.never;
+  });
+
+  // Run MCP server with layer scope kept alive
+  Effect.runPromise(
+    mcpProgram.pipe(
+      Effect.provide(AppLayer),
+      Effect.scoped
+    )
+  ).catch(() => {
+    // Process will exit naturally
   });
 }
 

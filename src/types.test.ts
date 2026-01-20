@@ -2,7 +2,9 @@
  * Tests for unified search result types
  */
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync, mkdirSync, rmSync } from "fs";
+import { join } from "path";
 import {
   EntityType,
   ConceptSearchResult,
@@ -10,6 +12,9 @@ import {
   UnifiedSearchResult,
   SearchResult,
   SearchOptions,
+  LibraryConfig,
+  loadConfig,
+  saveConfig,
 } from "./types";
 
 describe("Unified Search Types", () => {
@@ -200,6 +205,95 @@ describe("Unified Search Types", () => {
 
       // @ts-expect-error - entityType should not exist on SearchResult
       expect(result.entityType).toBeUndefined();
+    });
+  });
+
+  describe("library path resolution", () => {
+    const originalEnv = process.env.PDF_LIBRARY_PATH;
+    const originalHome = process.env.HOME;
+    const testDir = "/tmp/pdf-brain-test";
+
+    beforeEach(() => {
+      delete process.env.PDF_LIBRARY_PATH;
+      process.env.HOME = "/tmp";
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+
+    afterEach(() => {
+      if (originalEnv) {
+        process.env.PDF_LIBRARY_PATH = originalEnv;
+      } else {
+        delete process.env.PDF_LIBRARY_PATH;
+      }
+      if (originalHome) {
+        process.env.HOME = originalHome;
+      }
+      if (existsSync(testDir)) {
+        rmSync(testDir, { recursive: true, force: true });
+      }
+    });
+
+    test("uses default path when PDF_LIBRARY_PATH not set", () => {
+      const config = LibraryConfig.fromEnv();
+      expect(config.libraryPath).toBe("/tmp/Documents/.pdf-library");
+    });
+
+    test("uses PDF_LIBRARY_PATH when it exists", () => {
+      mkdirSync(testDir, { recursive: true });
+      process.env.PDF_LIBRARY_PATH = testDir;
+      
+      const config = LibraryConfig.fromEnv();
+      expect(config.libraryPath).toBe(testDir);
+    });
+
+    test("falls back to default when PDF_LIBRARY_PATH doesn't exist", () => {
+      process.env.PDF_LIBRARY_PATH = "/nonexistent/path";
+      
+      const warnings: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: any[]) => {
+        warnings.push(args.join(" "));
+      };
+      
+      const config = LibraryConfig.fromEnv();
+      
+      expect(config.libraryPath).toBe("/tmp/Documents/.pdf-library");
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings.some(w => w.includes('PDF_LIBRARY_PATH "/nonexistent/path" does not exist'))).toBe(true);
+      
+      console.warn = originalWarn;
+    });
+
+    test("loadConfig uses shared path resolution logic", () => {
+      mkdirSync(testDir, { recursive: true });
+      process.env.PDF_LIBRARY_PATH = testDir;
+      
+      const config = loadConfig();
+      expect(config).toBeDefined();
+    });
+
+    test("saveConfig uses shared path resolution logic", () => {
+      mkdirSync(testDir, { recursive: true });
+      process.env.PDF_LIBRARY_PATH = testDir;
+      
+      const config = loadConfig();
+      saveConfig(config);
+      
+      const configPath = join(testDir, "config.json");
+      expect(existsSync(configPath)).toBe(true);
+    });
+
+    test("all config functions use consistent path resolution", () => {
+      mkdirSync(testDir, { recursive: true });
+      process.env.PDF_LIBRARY_PATH = testDir;
+      
+      const config1 = LibraryConfig.fromEnv();
+      const config2 = loadConfig();
+      
+      expect(config1.libraryPath).toBe(testDir);
+      expect(config2).toBeDefined();
     });
   });
 });

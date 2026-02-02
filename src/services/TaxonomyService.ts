@@ -8,7 +8,7 @@
 import { Context, Effect, Layer } from "effect";
 import { createClient, type Client, type InValue } from "@libsql/client";
 import { DatabaseError } from "../types.js";
-import { Ollama } from "./Ollama.js";
+import { EmbeddingProvider, EmbeddingError } from "./EmbeddingProvider.js";
 
 // ============================================================================
 // Types
@@ -636,12 +636,12 @@ export class TaxonomyServiceImpl {
 }
 
 /**
- * Generate embedding for a concept using Ollama
- * Standalone function that requires Ollama service
+ * Generate embedding for a concept using EmbeddingProvider
+ * Standalone function that requires EmbeddingProvider service
  */
 export const generateConceptEmbedding = (concept: Concept) =>
   Effect.gen(function* () {
-    const ollama = yield* Ollama;
+    const embedProvider = yield* EmbeddingProvider;
 
     // Create text from prefLabel + definition for embedding
     // This ensures concepts are embedded in the same vector space as documents
@@ -649,8 +649,8 @@ export const generateConceptEmbedding = (concept: Concept) =>
       ? `${concept.prefLabel}: ${concept.definition}`
       : concept.prefLabel;
 
-    // Generate embedding using Ollama
-    const embedding = yield* ollama.embed(text);
+    // Generate embedding using EmbeddingProvider
+    const embedding = yield* embedProvider.embed(text);
 
     return embedding;
   }).pipe(
@@ -658,7 +658,7 @@ export const generateConceptEmbedding = (concept: Concept) =>
       (e): TaxonomyError =>
         new TaxonomyError(
           `Failed to generate embedding: ${
-            e._tag === "OllamaError" ? e.reason : String(e)
+            e._tag === "EmbeddingError" ? e.reason : String(e)
           }`
         )
     )

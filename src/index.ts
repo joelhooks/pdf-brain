@@ -26,6 +26,13 @@ import {
   probeEmbeddingDimension,
   getEmbeddingDimension,
 } from "./services/Ollama.js";
+import {
+  EmbeddingProvider,
+  EmbeddingProviderLive,
+  EmbeddingProviderFullLive,
+  EmbeddingError,
+} from "./services/EmbeddingProvider.js";
+import { GatewayLive } from "./services/Gateway.js";
 import { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
 import {
   MarkdownExtractor,
@@ -42,6 +49,12 @@ export {
   probeEmbeddingDimension,
   getEmbeddingDimension,
 } from "./services/Ollama.js";
+export {
+  EmbeddingProvider,
+  EmbeddingProviderLive,
+  EmbeddingProviderFullLive,
+  EmbeddingError,
+} from "./services/EmbeddingProvider.js";
 export { PDFExtractor, PDFExtractorLive } from "./services/PDFExtractor.js";
 export {
   MarkdownExtractor,
@@ -71,7 +84,7 @@ function isMarkdownFile(path: string): boolean {
  */
 export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
   effect: Effect.gen(function* () {
-    const ollama = yield* Ollama;
+    const embedProvider = yield* EmbeddingProvider;
     const pdfExtractor = yield* PDFExtractor;
     const markdownExtractor = yield* MarkdownExtractor;
     const db = yield* Database;
@@ -79,9 +92,9 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
 
     return {
       /**
-       * Check if Ollama is ready
+       * Check if embedding provider is ready
        */
-      checkReady: () => ollama.checkHealth(),
+      checkReady: () => embedProvider.checkHealth(),
 
       /**
        * Add a PDF or Markdown file to the library
@@ -104,8 +117,8 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             );
           }
 
-          // Check Ollama
-          yield* ollama.checkHealth();
+          // Check embedding provider
+          yield* embedProvider.checkHealth();
 
           const stat = statSync(resolvedPath);
           const id = createHash("sha256")
@@ -253,7 +266,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
             );
 
             // Generate embeddings for this batch with bounded concurrency
-            const batchEmbeddings = yield* ollama.embedBatch(
+            const batchEmbeddings = yield* embedProvider.embedBatch(
               batchContents,
               DEFAULT_QUEUE_CONFIG.concurrency,
             );
@@ -310,9 +323,9 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
           const results: SearchResult[] = [];
 
           // Vector search
-          const healthCheck = yield* Effect.either(ollama.checkHealth());
+          const healthCheck = yield* Effect.either(embedProvider.checkHealth());
           if (healthCheck._tag === "Right") {
-            const queryEmbedding = yield* ollama.embed(query);
+            const queryEmbedding = yield* embedProvider.embed(query);
             const vectorResults = yield* db.vectorSearch(
               queryEmbedding,
               options,
@@ -534,7 +547,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
       checkpoint: () => db.checkpoint(),
     };
   }),
-  dependencies: [OllamaLive, PDFExtractorLive, MarkdownExtractorLive],
+  dependencies: [EmbeddingProviderLive, PDFExtractorLive, MarkdownExtractorLive],
 }) {}
 
 // ============================================================================
@@ -596,5 +609,9 @@ export const PDFLibraryLive = (() => {
     embeddingDimension: embeddingDim,
   });
 
-  return PDFLibrary.Default.pipe(Layer.provide(dbLayer));
+  // Provide all dependencies internally: EmbeddingProvider (with Ollama + Gateway) and database
+  // This makes PDFLibraryLive a complete, self-contained layer
+  const fullDeps = Layer.merge(EmbeddingProviderFullLive, dbLayer);
+
+  return PDFLibrary.Default.pipe(Layer.provide(fullDeps));
 })();

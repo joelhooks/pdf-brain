@@ -299,6 +299,11 @@ export class OllamaError extends Schema.TaggedError<OllamaError>()(
   { reason: Schema.String }
 ) {}
 
+export class GatewayError extends Schema.TaggedError<GatewayError>()(
+  "GatewayError",
+  { reason: Schema.String }
+) {}
+
 export class DatabaseError extends Schema.TaggedError<DatabaseError>()(
   "DatabaseError",
   { reason: Schema.String }

@@ -20,7 +20,7 @@ import {
   TaxonomyService,
   generateConceptEmbedding,
 } from "./TaxonomyService.js";
-import { Ollama } from "./Ollama.js";
+import { EmbeddingProvider } from "./EmbeddingProvider.js";
 import { loadConfig } from "../types.js";
 
 // ============================================================================
@@ -679,7 +679,7 @@ function autoAcceptProposals(
 ): Effect.Effect<
   { accepted: number; rejected: number },
   EnrichmentError,
-  TaxonomyService | Ollama
+  TaxonomyService | EmbeddingProvider
 > {
   return Effect.gen(function* () {
     if (proposals.length === 0) {
@@ -687,7 +687,7 @@ function autoAcceptProposals(
     }
 
     const taxonomy = yield* TaxonomyService;
-    const ollama = yield* Ollama;
+    const embeddingProvider = yield* EmbeddingProvider;
 
     let accepted = 0;
     let rejected = 0;
@@ -698,7 +698,7 @@ function autoAcceptProposals(
         ? `${proposal.prefLabel}: ${proposal.definition}`
         : proposal.prefLabel;
 
-      const embedding = yield* ollama.embed(proposalText);
+      const embedding = yield* embeddingProvider.embed(proposalText);
 
       // Find similar concepts (lower threshold for LLM review candidates)
       const similar = yield* taxonomy.findSimilarConcepts(embedding, 0.75);
@@ -740,7 +740,7 @@ function autoAcceptProposals(
       (e) =>
         new EnrichmentError(
           `Auto-accept failed: ${
-            "_tag" in e && e._tag === "OllamaError"
+            "_tag" in e && (e._tag === "OllamaError" || e._tag === "GatewayError")
               ? e.reason
               : "_tag" in e && e._tag === "TaxonomyError"
               ? e.reason
@@ -760,16 +760,16 @@ function autoAcceptProposals(
  */
 function extractRAGContext(
   content: string
-): Effect.Effect<TaxonomyConcept[], EnrichmentError, TaxonomyService | Ollama> {
+): Effect.Effect<TaxonomyConcept[], EnrichmentError, TaxonomyService | EmbeddingProvider> {
   return Effect.gen(function* () {
-    const ollama = yield* Ollama;
+    const embeddingProvider = yield* EmbeddingProvider;
     const taxonomy = yield* TaxonomyService;
 
     // Extract sample (~2000 chars)
     const sample = content.slice(0, 2000);
 
     // Generate embedding for content
-    const embedding = yield* ollama.embed(sample);
+    const embedding = yield* embeddingProvider.embed(sample);
 
     // Find similar concepts (threshold 0.5 for broader matching)
     const conceptsFromDB = yield* taxonomy.findSimilarConcepts(
@@ -789,7 +789,7 @@ function extractRAGContext(
       (e) =>
         new EnrichmentError(
           `RAG context extraction failed: ${
-            "_tag" in e && e._tag === "OllamaError"
+            "_tag" in e && (e._tag === "OllamaError" || e._tag === "GatewayError")
               ? e.reason
               : "_tag" in e && e._tag === "TaxonomyError"
               ? e.reason
@@ -1110,14 +1110,14 @@ export class EnrichmentError {
 /**
  * AutoTagger service interface
  *
- * NOTE: enrich() now requires TaxonomyService and Ollama for auto-accept and RAG context
+ * NOTE: enrich() now requires TaxonomyService and EmbeddingProvider for auto-accept and RAG context
  */
 export interface AutoTagger {
   /**
    * Full document enrichment (title, summary, tags, etc.)
    * Uses local LLM first, falls back to Anthropic
    *
-   * Requires: TaxonomyService and Ollama for auto-accept and RAG context
+   * Requires: TaxonomyService and EmbeddingProvider for auto-accept and RAG context
    */
   readonly enrich: (
     filePath: string,
@@ -1126,7 +1126,7 @@ export interface AutoTagger {
   ) => Effect.Effect<
     EnrichmentResult,
     EnrichmentError,
-    TaxonomyService | Ollama
+    TaxonomyService | EmbeddingProvider
   >;
 
   /**

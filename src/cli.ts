@@ -48,7 +48,10 @@ import {
   type TaxonomyJSON,
   type Concept,
 } from "./services/TaxonomyService.js";
-import { Ollama, OllamaLive } from "./services/Ollama.js";
+import {
+  EmbeddingProvider,
+  EmbeddingProviderFullLive,
+} from "./services/EmbeddingProvider.js";
 
 /**
  * Check if a string is a URL
@@ -709,13 +712,13 @@ const program = Effect.gen(function* () {
       // Search concepts first (if enabled)
       if (searchConcepts) {
         const taxonomy = yield* TaxonomyService;
-        const ollamaService = yield* Ollama;
+        const embedProvider = yield* EmbeddingProvider;
 
-        // Try vector search on concepts using Ollama embeddings
+        // Try vector search on concepts using EmbeddingProvider
         const conceptResults = yield* Effect.gen(function* () {
-          const healthCheck = yield* Effect.either(ollamaService.checkHealth());
+          const healthCheck = yield* Effect.either(embedProvider.checkHealth());
           if (healthCheck._tag === "Right") {
-            const queryEmbedding = yield* ollamaService.embed(query);
+            const queryEmbedding = yield* embedProvider.embed(query);
             const similar = yield* taxonomy.findSimilarConcepts(
               queryEmbedding,
               0.3, // Lower threshold for broader results
@@ -2162,7 +2165,7 @@ if (args[0] === "taxonomy") {
 
   const AppLayer = Layer.merge(
     Layer.merge(Layer.merge(PDFLibraryLive, AutoTaggerLive), PDFExtractorLive),
-    Layer.merge(TaxonomyServiceLive, OllamaLive)
+    Layer.merge(TaxonomyServiceLive, EmbeddingProviderFullLive)
   );
 
   Effect.runPromise(

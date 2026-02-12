@@ -25,6 +25,8 @@ import {
   type FileStatus,
   type IngestState,
 } from "./components/IngestProgress.js";
+import { submitIngestJobs, getQueueStatus, QUEUE_NAME } from "./queue/ingest-producer.js";
+import { startWorker } from "./queue/ingest-worker.js";
 import {
   AutoTagger,
   AutoTaggerLive,
@@ -3467,6 +3469,65 @@ function makeProgram(args: string[], globals: GlobalCLIOptions) {
 	        };
 	        break;
 	      }
+
+    case "queue-ingest": {
+      const dir = args[1];
+      if (!dir) {
+        yield* Console.error("Error: Directory required");
+        yield* Console.error("Usage: pdf-brain queue-ingest <dir> [--no-enrich] [--auto-tag]");
+        return yield* Effect.fail(
+          new CLIError("INVALID_ARGS", "Directory required", { command: "queue-ingest" })
+        );
+      }
+
+      const opts = parseArgs(args.slice(2));
+      const enrich = opts["no-enrich"] !== true;
+      const autoTag = opts["auto-tag"] === true;
+      const tags = opts.tags
+        ? (opts.tags as string).split(",").map((t) => t.trim())
+        : undefined;
+
+      yield* Console.log(`Submitting ingest jobs for: ${dir}`);
+
+      const result = yield* Effect.promise(() =>
+        submitIngestJobs(dir, { enrich, autoTag, tags }, library)
+      );
+
+      yield* Console.log(`\n📋 Queue Summary:`);
+      yield* Console.log(`  Total files found: ${result.total}`);
+      yield* Console.log(`  Already ingested:  ${result.skipped}`);
+      yield* Console.log(`  Jobs submitted:    ${result.submitted}`);
+
+      if (result.submitted > 0) {
+        yield* Console.log(`\nStart the worker to process jobs:`);
+        yield* Console.log(`  pdf-brain queue-worker`);
+      }
+
+      resultPayload = result;
+      agentResult = { _tag: "stats", documents: result.submitted, chunks: 0, embeddings: 0 };
+      break;
+    }
+
+    case "queue-status": {
+      const status = yield* Effect.promise(() => getQueueStatus());
+
+      yield* Console.log(`📊 Queue Status (${QUEUE_NAME}):`);
+      yield* Console.log(`  Waiting:   ${status.waiting}`);
+      yield* Console.log(`  Active:    ${status.active}`);
+      yield* Console.log(`  Completed: ${status.completed}`);
+      yield* Console.log(`  Failed:    ${status.failed}`);
+      yield* Console.log(`  Delayed:   ${status.delayed}`);
+
+      resultPayload = status;
+      agentResult = { _tag: "stats", documents: status.completed, chunks: 0, embeddings: 0 };
+      break;
+    }
+
+    case "queue-worker": {
+      yield* Console.log("Starting queue worker...");
+      yield* Effect.promise(() => startWorker());
+      break;
+    }
 
     default:
       return yield* Effect.fail(

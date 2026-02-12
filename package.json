@@ -32,6 +32,7 @@
     "@modelcontextprotocol/sdk": "1.26.0",
     "@qdrant/js-client-rest": "^1.16.2",
     "ai": "^5.0.115",
+    "bullmq": "^5.68.0",
     "dotenv": "^17.2.3",
     "effect": "^3.12.0",
     "gray-matter": "^4.0.3",

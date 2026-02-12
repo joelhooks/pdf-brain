@@ -353,7 +353,7 @@ export class QdrantDatabase {
           }
 
           const points = embeddings.map((item) => {
-            const existingPayload = existingById.get(item.chunkId);
+            const existingPayload = existingById.get(hexToUuid(item.chunkId));
 
             if (!existingPayload) {
               return {

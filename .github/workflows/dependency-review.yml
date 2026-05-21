@@ -20,7 +20,7 @@ jobs:
       - name: Checkout Repo
         uses: actions/checkout@v4
       - name: Dependency Review
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         continue-on-error: true # Private repos may lack dependency-review/GHAS support; keep advisory until enabled.
         with:
           fail-on-severity: high

@@ -1,0 +1,26 @@
+name: Dependency Review
+
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'package-lock.json'
+      - 'yarn.lock'
+      - 'bun.lock'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        continue-on-error: true # Private repos may lack dependency-review/GHAS support; keep advisory until enabled.
+        with:
+          fail-on-severity: high

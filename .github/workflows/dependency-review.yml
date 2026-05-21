@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
         continue-on-error: true # Private repos may lack dependency-review/GHAS support; keep advisory until enabled.

@@ -80,6 +80,11 @@ ollama pull llama3.2:3b
 ollama serve
 ```
 
+### Install uv Python package manager
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 ### Install pdf-brain
 
 ```bash

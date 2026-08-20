@@ -9,10 +9,11 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, chmodSync } from "fs";
 import { join } from "path";
+import { homedir } from "node:os";
 import { logInfo } from "./logger.js";
 
 const REPO = "joelhooks/pdf-brain";
-const STATE_DIR = join(process.env.HOME || "~", ".pdf-brain");
+const STATE_DIR = join((process.env.HOME || homedir()), ".pdf-brain");
 const STATE_FILE = join(STATE_DIR, "update-check.json");
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 1 day
 

@@ -7,6 +7,7 @@
 
 import { Context, Effect, Layer, Schema } from "effect";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkFrontmatter from "remark-frontmatter";
@@ -476,7 +477,7 @@ function chunkText(
  */
 function resolvePath(path: string): string {
   return path.startsWith("~")
-    ? path.replace("~", process.env.HOME || "")
+    ? path.replace("~", (process.env.HOME || homedir()))
     : path;
 }
 

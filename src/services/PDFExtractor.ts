@@ -10,6 +10,7 @@ import {
   LibraryConfig,
 } from "../types.js";
 import { existsSync } from "fs";
+import { homedir } from "node:os";
 
 // ============================================================================
 // Service Definition
@@ -185,7 +186,7 @@ export const PDFExtractorLive = Layer.effect(
         Effect.gen(function* () {
           // Resolve path
           const resolvedPath = path.startsWith("~")
-            ? path.replace("~", process.env.HOME || "")
+            ? path.replace("~", process.env.HOME || homedir())
             : path;
 
           if (!existsSync(resolvedPath)) {
@@ -197,7 +198,7 @@ export const PDFExtractorLive = Layer.effect(
           const result = yield* Effect.tryPromise({
             try: async () => {
               const output =
-                await $`uv run --with pypdf python3 -c ${EXTRACT_SCRIPT} ${resolvedPath}`.text();
+                await $`uv run --with pypdf python -c ${EXTRACT_SCRIPT} ${resolvedPath}`.text();
               return JSON.parse(output) as ExtractedPDF;
             },
             catch: (e) =>
@@ -210,7 +211,7 @@ export const PDFExtractorLive = Layer.effect(
       process: (path: string) =>
         Effect.gen(function* () {
           const resolvedPath = path.startsWith("~")
-            ? path.replace("~", process.env.HOME || "")
+            ? path.replace("~", process.env.HOME || homedir())
             : path;
 
           if (!existsSync(resolvedPath)) {
@@ -222,7 +223,7 @@ export const PDFExtractorLive = Layer.effect(
           const extracted = yield* Effect.tryPromise({
             try: async () => {
               const output =
-                await $`uv run --with pypdf python3 -c ${EXTRACT_SCRIPT} ${resolvedPath}`.text();
+                await $`uv run --with pypdf python -c ${EXTRACT_SCRIPT} ${resolvedPath}`.text();
               return JSON.parse(output) as ExtractedPDF;
             },
             catch: (e) =>

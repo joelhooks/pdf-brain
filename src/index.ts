@@ -8,6 +8,7 @@ import { Duration, Effect, Layer } from "effect";
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { basename } from "node:path";
+import { homedir } from "node:os";
 
 import {
   AddOptions,
@@ -107,7 +108,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
         Effect.gen(function* () {
           // Resolve path
           const resolvedPath = pdfPath.startsWith("~")
-            ? pdfPath.replace("~", process.env.HOME || "")
+            ? pdfPath.replace("~", (process.env.HOME || homedir()))
             : pdfPath;
 
           // Check if already exists
@@ -336,7 +337,7 @@ export class PDFLibrary extends Effect.Service<PDFLibrary>()("PDFLibrary", {
         Effect.gen(function* () {
           // Resolve path
           const resolvedPath = pdfPath.startsWith("~")
-            ? pdfPath.replace("~", process.env.HOME || "")
+            ? pdfPath.replace("~", (process.env.HOME || homedir()))
             : pdfPath;
 
           // Require existing doc (this is "replace", not "add")
